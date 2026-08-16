@@ -2,7 +2,7 @@ import { isStateSyncronized, myProfile } from '@dcl/sdk/network'
 import { Question, QUESTIONS, getQuestionIndexForRound } from './questions'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
 import { getRoundState, writeRoundState, startRoundStateSync, SharedPhase, NO_QUESTION, NO_COORDINATOR, RoundStateValue } from './networkRoundState'
-import { getActiveUserIds } from './networkPlayerSession'
+import { getActiveUserIds, setJoined } from './networkPlayerSession'
 import {
     AnswerOption,
     PlayerAnswerValue,
@@ -42,12 +42,18 @@ export interface RoundSnapshot {
     isRevealing: boolean
     /** Live-recomputed every read - never a frozen one-time snapshot. */
     reveal: RevealData | null
+    /** Transient local AFK notice: 'warning' after 1 missed round, 'removed' right after auto-unjoin on the 2nd. */
+    afkMessage: 'warning' | 'removed' | null
 }
 
 const ANSWERING_SECONDS = 10
 const RESULT_SECONDS = 3
 /** How long into RESULT we keep waiting for missing answers before revealing anyway. */
 const REVEAL_TIMEOUT_SECONDS = 1
+/** How many consecutive missed eligible rounds trigger automatic unjoin. */
+const MAX_CONSECUTIVE_MISSES = 2
+/** How long (in round ticks, ~seconds) a transient AFK message stays visible. */
+const AFK_MESSAGE_TICKS = 3
 
 function phaseDuration(phase: SharedPhase): number {
     return phase === SharedPhase.ANSWERING ? ANSWERING_SECONDS : RESULT_SECONDS
@@ -95,9 +101,16 @@ class RoundManager {
 
     private selectedOption: Option | null = null
     private lastObservedRoundId: number | null = null
+    private lastObservedPhase: SharedPhase | null = null
 
     /** roundId this client has already published its own PlayerAnswer for (publish-once guard). */
     private publishedForRoundId: number | null = null
+
+    /** AFK tracking - purely local, never synced: each client enforces only its own inactivity. */
+    private consecutiveMissedRounds = 0
+    private afkEvaluatedForRoundId: number | null = null
+    private afkMessage: 'warning' | 'removed' | null = null
+    private afkMessageTicksRemaining = 0
 
     /** Starts the shared-state sync and the local tick loop. Safe to call more than once. */
     start(): void {
@@ -127,7 +140,8 @@ class RoundManager {
                 selectedOption: null,
                 secondsLeft: 0,
                 isRevealing: false,
-                reveal: null
+                reveal: null,
+                afkMessage: null
             }
         }
 
@@ -164,12 +178,20 @@ class RoundManager {
             selectedOption: this.selectedOption,
             secondsLeft: state.secondsLeft,
             isRevealing,
-            reveal
+            reveal,
+            afkMessage: this.afkMessage
         }
     }
 
     private tick(): void {
         if (!isStateSyncronized()) return // Not synced yet: never write, never publish.
+
+        if (this.afkMessage !== null) {
+            this.afkMessageTicksRemaining -= 1
+            if (this.afkMessageTicksRemaining <= 0) {
+                this.afkMessage = null
+            }
+        }
 
         const state = getRoundState()
         const eligibleUserIds = getActiveUserIds(relevantRoundId(state))
@@ -250,12 +272,64 @@ class RoundManager {
         })
     }
 
-    /** Local-only bookkeeping every client runs regardless of coordinator role: clearing the private answer on a new round. */
+    /**
+     * Local-only bookkeeping every client runs regardless of coordinator role: clearing
+     * the private answer on a new round, and evaluating this client's own AFK status the
+     * moment it observes its own round's normal ANSWERING -> RESULT transition (same
+     * roundId). Deliberately NOT triggered by ANSWERING -> WAITING (e.g. the round is
+     * aborted back to WAITING because another player left and fewer than 2 active players
+     * remain) - that is an interrupted round, not a missed answer.
+     */
     private syncLocalBookkeeping(state: RoundStateValue): void {
-        if (state.roundId !== this.lastObservedRoundId) {
+        const isNewRound = state.roundId !== this.lastObservedRoundId
+        const answeringJustEnded =
+            !isNewRound && this.lastObservedPhase === SharedPhase.ANSWERING && state.phase === SharedPhase.RESULT
+
+        if (answeringJustEnded) {
+            this.evaluateAfkForRound(state.roundId)
+        }
+
+        if (isNewRound) {
             this.selectedOption = null
             this.lastObservedRoundId = state.roundId
+            // Never let a transient AFK notice linger into a new round's answer buttons.
+            this.afkMessage = null
+            this.afkMessageTicksRemaining = 0
         }
+        this.lastObservedPhase = state.phase
+    }
+
+    /**
+     * Counts a miss only if this client was ACTIVE (joined and eligible) for `roundId` and
+     * had not answered by the time its ANSWERING phase ended. Evaluated at most once per
+     * round. Answering resets the streak; 2 consecutive misses auto-unjoin via the same
+     * setJoined() primitive the Quest Zone exit already uses - no shared AFK authority,
+     * no inference about remote players.
+     */
+    private evaluateAfkForRound(roundId: number): void {
+        if (this.afkEvaluatedForRoundId === roundId) return
+        this.afkEvaluatedForRoundId = roundId
+
+        if (!getActiveUserIds(roundId).includes(myProfile.userId)) return // wasn't active for this round - never a miss
+
+        if (this.selectedOption !== null) {
+            this.consecutiveMissedRounds = 0
+            return
+        }
+
+        this.consecutiveMissedRounds += 1
+        if (this.consecutiveMissedRounds >= MAX_CONSECUTIVE_MISSES) {
+            this.consecutiveMissedRounds = 0
+            setJoined(false)
+            this.showAfkMessage('removed')
+        } else {
+            this.showAfkMessage('warning')
+        }
+    }
+
+    private showAfkMessage(message: 'warning' | 'removed'): void {
+        this.afkMessage = message
+        this.afkMessageTicksRemaining = AFK_MESSAGE_TICKS
     }
 
     /** Publishes this client's own answer exactly once, the first tick RESULT is observed for this round - only if ACTIVE for it. */

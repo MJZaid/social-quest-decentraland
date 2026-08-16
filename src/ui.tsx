@@ -21,6 +21,7 @@ const MUTED = Color4.create(0.7, 0.7, 0.75, 1)
 // draw your UI here
 export const uiMenu = () => {
     const session = playerSessionManager.getSnapshot()
+    const round = roundManager.getSnapshot()
 
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
@@ -51,7 +52,33 @@ export const uiMenu = () => {
                             uiTransform={{ margin: { bottom: 18 } }}
                         />
 
-                        {!session.isSafeToJoin ? (
+                        {round.afkMessage === 'removed' ? (
+                            <UiEntity uiTransform={COLUMN_CENTERED}>
+                                <Label
+                                    value="REMOVED FOR INACTIVITY"
+                                    fontSize={30}
+                                    color={Color4.create(1, 0.5, 0.4, 1)}
+                                    uiTransform={{ margin: { bottom: 12 } }}
+                                />
+                                <Label value="You missed 2 questions." fontSize={22} color={MUTED} />
+                            </UiEntity>
+                        ) : round.afkMessage === 'warning' ? (
+                            <UiEntity uiTransform={COLUMN_CENTERED}>
+                                <Label
+                                    value="STILL THERE?"
+                                    fontSize={30}
+                                    color={Color4.create(1, 0.85, 0.2, 1)}
+                                    uiTransform={{ margin: { bottom: 12 } }}
+                                />
+                                <Label
+                                    value="Answer the next question to stay in Social Quest."
+                                    fontSize={20}
+                                    textAlign="middle-center"
+                                    textWrap="wrap"
+                                    color={MUTED}
+                                />
+                            </UiEntity>
+                        ) : !session.isSafeToJoin ? (
                             <Label value="PREPARING SOCIAL QUEST..." fontSize={32} color={MUTED} />
                         ) : !session.joined ? (
                             <JoinScreen />
