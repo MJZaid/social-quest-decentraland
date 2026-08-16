@@ -4,6 +4,7 @@ import { MIN_PLAYERS_REQUIRED } from './playerManager'
 import { getRoundState, writeRoundState, startRoundStateSync, SharedPhase, NO_QUESTION, NO_COORDINATOR, RoundStateValue } from './networkRoundState'
 import { getActiveUserIds, setJoined } from './networkPlayerSession'
 import { processRoundState } from './connectionsManager'
+import { tick as tickConnectionCelebration } from './connectionCelebration'
 import {
     AnswerOption,
     PlayerAnswerValue,
@@ -202,6 +203,7 @@ class RoundManager {
         this.syncLocalBookkeeping(stateAfterElection)
         this.maybePublishAnswer(stateAfterElection)
         processRoundState(stateAfterElection)
+        tickConnectionCelebration(stateAfterElection)
 
         if (!amICoordinator) return // Followers never write round/timer state.
 
