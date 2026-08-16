@@ -3,6 +3,7 @@ import { Color4 } from '@dcl/sdk/math'
 import { roundManager } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
+import { getTotalConnections, getRecentConnections, getDisplayNameFor } from './connectionsManager'
 
 export function setupUi() {
     roundManager.start()
@@ -17,6 +18,12 @@ const COLUMN_CENTERED = {
 }
 
 const MUTED = Color4.create(0.7, 0.7, 0.75, 1)
+const PANEL_BACKGROUND = Color4.create(0.05, 0.05, 0.1, 0.85)
+/** Never used as an identity - purely a friendly presentation fallback when a name can't be resolved. */
+const QUESTMATE_FALLBACK = 'Questmate'
+
+/** Collapse/expand is presentation-only and local to this client - never synced. Default: collapsed. */
+let socialHudExpanded = false
 
 // draw your UI here
 export const uiMenu = () => {
@@ -26,6 +33,21 @@ export const uiMenu = () => {
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
         <ScreenInsetArea>
+            {/* Persistent Social HUD - visible everywhere in the scene, independent of Quest Zone/join/round state.
+                Top-center: native Decentraland UI occupies top-left (and sometimes top-right), so this full-width,
+                top-anchored band with a horizontally-centered child is the only corner-independent safe spot. */}
+            <UiEntity
+                uiTransform={{
+                    positionType: 'absolute',
+                    position: { top: 24 },
+                    width: '100%',
+                    flexDirection: 'column',
+                    alignItems: 'center'
+                }}
+            >
+                <SocialHud />
+            </UiEntity>
+
             <UiEntity
                 uiTransform={{
                     width: '100%',
@@ -241,6 +263,74 @@ const JoinedGameplay = () => {
                             </UiEntity>
                         </UiEntity>
                     )}
+                </UiEntity>
+            )}
+        </UiEntity>
+    )
+}
+
+/**
+ * Persistent social status bar - visible anywhere in the scene, regardless of Quest
+ * Zone/join/round state. Consumes connectionsManager's read API only; no relationship
+ * logic is reconstructed here. Collapsed by default; toggled via a normal click/touch
+ * target (no hover dependence, per mobile requirements).
+ */
+const SocialHud = () => {
+    const total = getTotalConnections()
+
+    if (!socialHudExpanded) {
+        return (
+            <UiEntity
+                uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={() => {
+                    socialHudExpanded = true
+                }}
+            >
+                <Label value={`CONNECTIONS  ${total}`} fontSize={20} color={Color4.White()} uiTransform={{ margin: { right: 8 } }} />
+                <Label value="▼" fontSize={16} color={MUTED} />
+            </UiEntity>
+        )
+    }
+
+    // Questmate numbering is presentation-only and scoped to this single render of the
+    // recent list - it never substitutes for the real userId identity.
+    const recentUserIds = getRecentConnections()
+    let unresolvedCount = 0
+    const recentLabels = recentUserIds.map((userId) => {
+        const cachedName = getDisplayNameFor(userId)
+        if (cachedName) return cachedName
+        unresolvedCount += 1
+        return `${QUESTMATE_FALLBACK} ${unresolvedCount}`
+    })
+
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: 280, padding: 20 }} uiBackground={{ color: PANEL_BACKGROUND }}>
+            <UiEntity
+                uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', margin: { bottom: 14 } }}
+                onMouseDown={() => {
+                    socialHudExpanded = false
+                }}
+            >
+                <Label value="MY SOCIAL QUEST" fontSize={18} color={Color4.create(1, 0.85, 0.2, 1)} />
+                <Label value="▲" fontSize={16} color={MUTED} />
+            </UiEntity>
+
+            <Label value="CONNECTIONS" fontSize={14} color={MUTED} uiTransform={{ margin: { bottom: 4 } }} />
+            <Label value={`${total}`} fontSize={28} color={Color4.White()} uiTransform={{ margin: { bottom: 16 } }} />
+
+            {recentLabels.length > 0 && (
+                <UiEntity uiTransform={{ width: '100%', flexDirection: 'column' }}>
+                    <Label value="RECENT CONNECTIONS" fontSize={14} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
+                    {recentUserIds.map((userId, index) => (
+                        <Label
+                            key={userId}
+                            value={recentLabels[index]}
+                            fontSize={18}
+                            color={Color4.White()}
+                            uiTransform={{ margin: { bottom: 4 } }}
+                        />
+                    ))}
                 </UiEntity>
             )}
         </UiEntity>

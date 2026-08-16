@@ -1,6 +1,10 @@
 import { myProfile } from '@dcl/sdk/network'
+import { getPlayer } from '@dcl/sdk/players'
 import { SharedPhase, RoundStateValue } from './networkRoundState'
-import { AnswerOption, getAnswersForRound } from './networkPlayerAnswer'
+import { AnswerOption, getAnswersForRound, getDisplayName } from './networkPlayerAnswer'
+
+/** Recent Connections history is capped, not a full session log. */
+const MAX_RECENT_CONNECTIONS = 5
 
 /** Public, UI-facing view of a relationship - no internal bookkeeping exposed. */
 export interface ConnectionRecord {
@@ -23,6 +27,11 @@ const connections = new Map<string, InternalConnection>()
 let currentRoundId: number | null = null
 /** Unique new partners accumulated across every RESULT tick of currentRoundId - late arrivals get appended, not just the first tick's set. */
 let newConnectionsThisRound: string[] = []
+
+/** Presentation-only history of newly-created Connections, newest first, capped - separate from the relationship counters. */
+let recentConnectionUserIds: string[] = []
+/** Presentation-only cache: userId -> best-resolved display name, populated while that player is provably present. */
+const displayNameCache = new Map<string, string>()
 
 /**
  * Re-evaluates this client's own Connections for the current round on every RESULT
@@ -52,8 +61,34 @@ export function processRoundState(state: RoundStateValue): void {
         if (other.option === AnswerOption.NO_ANSWER) continue
 
         const isNew = recordRound(other.userId, state.roundId, myAnswer.option, other.option)
-        if (isNew) newConnectionsThisRound.push(other.userId)
+        if (isNew) {
+            newConnectionsThisRound.push(other.userId)
+            addToRecentConnections(other.userId)
+        }
+        // Attempted for every encounter (not just isNew) so a name that failed to resolve on
+        // the very first round together can still be picked up on a later one - cheap no-op
+        // once cached.
+        cacheDisplayNameIfNeeded(other.userId)
     }
+}
+
+/** Records `userId` as the newest Connection, capped at MAX_RECENT_CONNECTIONS. Only ever called for a genuinely new relationship - repeated rounds with an existing partner never re-add or reorder them. */
+function addToRecentConnections(userId: string): void {
+    recentConnectionUserIds = [userId, ...recentConnectionUserIds].slice(0, MAX_RECENT_CONNECTIONS)
+}
+
+/**
+ * Caches the best available display name the moment it can be resolved. Uses getPlayer()
+ * directly (not getDisplayName()'s own 'Player' fallback string) to detect genuine
+ * resolvability, so we never mistake "could not resolve" for a real name - an unresolved
+ * entry is simply left out of the cache and the UI applies its own Questmate/Questmate N
+ * fallback instead. The cached value itself still comes from getDisplayName(), reusing the
+ * project's existing safe resolution.
+ */
+function cacheDisplayNameIfNeeded(userId: string): void {
+    if (displayNameCache.has(userId)) return
+    if (!getPlayer({ userId })) return // not resolvable right now - try again next encounter
+    displayNameCache.set(userId, getDisplayName(userId))
 }
 
 /**
@@ -103,4 +138,14 @@ export function getAllConnections(): ConnectionRecord[] {
         sameAnswers: record.sameAnswers,
         differentAnswers: record.differentAnswers
     }))
+}
+
+/** Newest-first userIds of the most recently created Connections this session, capped at MAX_RECENT_CONNECTIONS (or `limit` if smaller). */
+export function getRecentConnections(limit: number = MAX_RECENT_CONNECTIONS): string[] {
+    return recentConnectionUserIds.slice(0, limit)
+}
+
+/** The cached display name for `userId`, or null if it was never resolvable while that player was present. Presentation only - never the identity key. */
+export function getDisplayNameFor(userId: string): string | null {
+    return displayNameCache.get(userId) ?? null
 }
