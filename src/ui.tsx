@@ -1,7 +1,7 @@
 import ReactEcs, { Button, Label, ReactEcsRenderer, ScreenInsetArea, UiEntity } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, UiCanvasInformation } from '@dcl/sdk/ecs'
-import { roundManager } from './roundManager'
+import { roundManager, RevealData, RevealEntry } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
 import { getTotalConnections, getRecentConnections, getDisplayNameFor, getConnection, getAllConnections } from './connectionsManager'
@@ -102,6 +102,51 @@ const AGENDA_WIDTH_COMPACT = 460
  * "reliability over sophistication" guidance for this feature.
  */
 const AGENDA_ROWS_PER_PAGE = 6
+
+/**
+ * Maximum names shown per RESULT option column before collapsing the rest into
+ * "+N MORE" - keeps the timed, non-scrolling RESULT screen bounded regardless of
+ * group size. Same WIDE_MIN_SCALE canvas-scale signal as everywhere else decides
+ * which cap applies; no separate very-small tier for the columns themselves (see
+ * report - the existing proportional virtual-canvas scaling already degrades
+ * gracefully there, same as the rest of the gameplay panel's content).
+ */
+const REVEAL_MAX_NAMES_WIDE = 5
+const REVEAL_MAX_NAMES_COMPACT = 3
+
+/**
+ * Per-row height of the RESULT name list, shared by real name rows and the
+ * "+N MORE" row alike (unified to the same height so a row count converts to a
+ * height with one exact formula). Used to give both A/B ResultColumns an
+ * IDENTICAL reserved name-list height regardless of how many names either side
+ * actually has - see RevealResults' requiredRows calculation - so the two cards
+ * never end up visually unbalanced.
+ */
+const REVEAL_NAME_ROW_HEIGHT_WIDE = 26
+const REVEAL_NAME_ROW_HEIGHT_COMPACT = 20
+/** Vertical gap between consecutive name-list rows (both real names and the overflow row). */
+const REVEAL_NAME_ROW_GAP = 4
+
+/**
+ * Option-title font sizes and reserved title-area height, ResultColumn's option
+ * title (e.g. "B — An Exciting Possibility") can wrap to 2 lines for longer
+ * question-bank options. Same root cause as the earlier name-overlap bug: a
+ * bare wrap-enabled Label's rendered height isn't reliably fed back into this
+ * SDK's flex layout, so an unsized wrapper let a 2-line title collide with the
+ * stats line below it. Fixed the same proven way - an explicit, fixed-height
+ * wrapper around the Label, sized generously enough (checked against the
+ * longest known question-bank option strings, ~43 characters) to hold 2 lines
+ * regardless of what the Label itself measures to. COMPACT's font is nudged
+ * down slightly (16 -> 15) for a bit more breathing room in the narrower card.
+ */
+const REVEAL_TITLE_FONT_SIZE_WIDE = 20
+const REVEAL_TITLE_FONT_SIZE_COMPACT = 15
+const REVEAL_TITLE_AREA_HEIGHT_WIDE = 52
+const REVEAL_TITLE_AREA_HEIGHT_COMPACT = 38
+
+/** Reserved height for the "N PLAYERS · XX%" stats row - its own fixed-height row below the title area, so the title can never overlap it regardless of how many lines the title wraps to. */
+const REVEAL_STATS_ROW_HEIGHT_WIDE = 22
+const REVEAL_STATS_ROW_HEIGHT_COMPACT = 18
 
 /**
  * Reads the SDK-reported live UI canvas size (UiCanvasInformation on engine.RootEntity)
@@ -423,41 +468,192 @@ const JoinedGameplay = () => {
                     {isRevealing || !reveal ? (
                         <Label value="REVEALING..." fontSize={32} color={MUTED} />
                     ) : (
-                        <UiEntity uiTransform={COLUMN_CENTERED}>
-                            <Label
-                                value="RESULTS"
-                                fontSize={32}
-                                color={Color4.create(0.6, 1, 0.6, 1)}
-                                uiTransform={{ margin: { bottom: 12 } }}
-                            />
-                            {reveal.entries.map((entry) => (
-                                <Label
-                                    key={entry.userId}
-                                    value={`${entry.name} — ${
-                                        entry.option === 'A'
-                                            ? activeQuestion.optionA
-                                            : entry.option === 'B'
-                                              ? activeQuestion.optionB
-                                              : 'NO ANSWER'
-                                    }`}
-                                    fontSize={22}
-                                    color={Color4.White()}
-                                    uiTransform={{ margin: { bottom: 4 } }}
-                                />
-                            ))}
-                            <UiEntity uiTransform={{ flexDirection: 'row', margin: { top: 12 } }}>
-                                <Label
-                                    value={`${activeQuestion.optionA}: ${reveal.countA}`}
-                                    fontSize={20}
-                                    color={MUTED}
-                                    uiTransform={{ margin: { right: 16 } }}
-                                />
-                                <Label value={`${activeQuestion.optionB}: ${reveal.countB}`} fontSize={20} color={MUTED} />
-                            </UiEntity>
-                        </UiEntity>
+                        <RevealResults optionAText={activeQuestion.optionA} optionBText={activeQuestion.optionB} reveal={reveal} />
                     )}
                 </UiEntity>
             )}
+        </UiEntity>
+    )
+}
+
+/**
+ * Two-column RESULT presentation: LEFT = Option A, RIGHT = Option B, equally
+ * weighted (no winner/loser framing, no ranking). Purely a renderer of the
+ * `reveal` snapshot it's given - reveal.entries/countA/countB are already
+ * recomputed live every RoundManager.getSnapshot() call during RESULT (to
+ * absorb late-arriving answers), and this component re-derives names/counts/
+ * percentages/+N from that snapshot on every render, so a late answer updates
+ * the columns automatically with no frozen state of its own. NO_ANSWER entries
+ * (entry.option === null) are simply not included in either column, preserving
+ * the existing reveal rule that they're excluded from the A/B comparison - no
+ * third column was added.
+ */
+const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: string; optionBText: string; reveal: RevealData }) => {
+    const wide = getUiScale() >= WIDE_MIN_SCALE
+    const maxNames = wide ? REVEAL_MAX_NAMES_WIDE : REVEAL_MAX_NAMES_COMPACT
+
+    const entriesA = reveal.entries.filter((entry) => entry.option === 'A')
+    const entriesB = reveal.entries.filter((entry) => entry.option === 'B')
+
+    // Both columns must render at the SAME height regardless of how many names either side
+    // actually has (no winner/loser framing via card size) - so the "row budget" a column
+    // reserves for its name list is the larger of what EITHER side needs, not its own count.
+    // +1 accounts for the "+N MORE" overflow row when a side exceeds maxNames.
+    const rowsNeededFor = (entries: RevealEntry[]) => Math.min(entries.length, maxNames) + (entries.length > maxNames ? 1 : 0)
+    const requiredRows = Math.max(rowsNeededFor(entriesA), rowsNeededFor(entriesB))
+
+    // Percentages are of VALID A/B answers only (never NO_ANSWER, never total participant
+    // count) - matches the existing reveal rule that countA/countB already exclude NO_ANSWER.
+    // percentB is derived as the complement of percentA (not independently rounded) so the
+    // two displayed percentages always sum to exactly 100% - rounding both sides separately
+    // can otherwise land on totals like 101% (e.g. 1/8 -> 13%, 7/8 -> 88%).
+    const totalValid = reveal.countA + reveal.countB
+    const percentA = totalValid > 0 ? Math.round((reveal.countA / totalValid) * 100) : 0
+    const percentB = totalValid > 0 ? 100 - percentA : 0
+
+    return (
+        <UiEntity uiTransform={COLUMN_CENTERED}>
+            <Label value="RESULTS" fontSize={32} color={Color4.create(0.85, 0.75, 1, 1)} uiTransform={{ margin: { bottom: 16 } }} />
+            <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center', alignItems: 'flex-start' }}>
+                <ResultColumn
+                    label="A"
+                    optionText={optionAText}
+                    count={reveal.countA}
+                    percent={percentA}
+                    entries={entriesA}
+                    maxNames={maxNames}
+                    nameListRows={requiredRows}
+                    wide={wide}
+                />
+                <UiEntity uiTransform={{ width: wide ? 24 : 14 }} />
+                <ResultColumn
+                    label="B"
+                    optionText={optionBText}
+                    count={reveal.countB}
+                    percent={percentB}
+                    entries={entriesB}
+                    maxNames={maxNames}
+                    nameListRows={requiredRows}
+                    wide={wide}
+                />
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * One RESULT option column. Both A and B use identical styling/weight - a shared
+ * violet/lavender accent, no green/red, no "winner" treatment - per the "social
+ * discovery, not competition" direction. Names are `entry.name`, resolved exactly
+ * as before by roundManager's own buildRevealData() (unchanged) - not the
+ * separate getDisplayNameFor/Questmate cache the HUD/Agenda/celebrations use,
+ * since reveal names were already resolving correctly before this task and this
+ * is presentation-only.
+ */
+const ResultColumn = ({
+    label,
+    optionText,
+    count,
+    percent,
+    entries,
+    maxNames,
+    nameListRows,
+    wide
+}: {
+    label: 'A' | 'B'
+    optionText: string
+    count: number
+    percent: number
+    entries: RevealEntry[]
+    maxNames: number
+    /** Shared row budget from RevealResults (the larger of what either A or B needs) - both columns reserve this same amount of name-list height, so neither card's size depends on its own content alone. */
+    nameListRows: number
+    wide: boolean
+}) => {
+    const shown = entries.slice(0, maxNames)
+    const remaining = entries.length - shown.length
+    const rowHeight = wide ? REVEAL_NAME_ROW_HEIGHT_WIDE : REVEAL_NAME_ROW_HEIGHT_COMPACT
+    // Fixed height for nameListRows rows plus the gaps between them (none if there are no rows at all).
+    const nameListHeight = nameListRows > 0 ? nameListRows * rowHeight + (nameListRows - 1) * REVEAL_NAME_ROW_GAP : 0
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width: wide ? 320 : 220,
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                padding: wide ? 18 : 12,
+                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
+                borderWidth: 1,
+                borderRadius: 10
+            }}
+            uiBackground={{ color: Color4.create(0.16, 0.09, 0.22, 0.85) }}
+        >
+            {/* Option title: its own explicit-height wrapper, same reliable technique as the
+                name-list fix - the wrapped Label's own measured height isn't trusted, so the
+                stats row below is positioned relative to this fixed box instead, regardless of
+                whether the title actually renders as 1 or 2 lines. */}
+            <UiEntity
+                uiTransform={{
+                    width: '100%',
+                    height: wide ? REVEAL_TITLE_AREA_HEIGHT_WIDE : REVEAL_TITLE_AREA_HEIGHT_COMPACT,
+                    alignItems: 'flex-start',
+                    margin: { bottom: 8 }
+                }}
+            >
+                <Label
+                    value={`${label} — ${optionText}`}
+                    fontSize={wide ? REVEAL_TITLE_FONT_SIZE_WIDE : REVEAL_TITLE_FONT_SIZE_COMPACT}
+                    color={Color4.create(0.85, 0.75, 1, 1)}
+                    textWrap="wrap"
+                    uiTransform={{ width: '100%' }}
+                />
+            </UiEntity>
+            {/* Stats row: same fixed-height-wrapper treatment, so it can never overlap the
+                names below it either. */}
+            <UiEntity
+                uiTransform={{
+                    width: '100%',
+                    height: wide ? REVEAL_STATS_ROW_HEIGHT_WIDE : REVEAL_STATS_ROW_HEIGHT_COMPACT,
+                    alignItems: 'flex-start',
+                    margin: { bottom: 12 }
+                }}
+            >
+                <Label value={`${count} PLAYER${count === 1 ? '' : 'S'} · ${percent}%`} fontSize={wide ? 16 : 13} color={MUTED} />
+            </UiEntity>
+            {/* Each name gets its own row container with an EXPLICIT height - the previous bare,
+                wrap-enabled Labels stacked directly in this flex column didn't reliably report
+                their wrapped-text height back into layout, so Yoga gave successive rows ~zero
+                space and the names visually collapsed onto each other. A fixed row height sidesteps
+                that text-measurement fragility entirely: it's correct regardless of what the text
+                measures to, so rows can never overlap. Single-line (no textWrap) for the same
+                reason - reliability over wrapping, per the SDK behavior actually observed here;
+                an unusually long name may extend past the card rather than wrap, which is a lesser,
+                pre-existing limitation (the original flat reveal list never truncated names either),
+                not a regression from this fix. */}
+            {/* Fixed-height list zone, sized from the SHARED nameListRows budget (not this
+                column's own entry count) - this is what keeps the A and B cards the same
+                total height even when one side has several names and the other has none.
+                The emptier side just leaves clean blank space here; no fake placeholder
+                names or "Nobody" text is ever rendered. */}
+            <UiEntity uiTransform={{ width: '100%', height: nameListHeight, flexDirection: 'column' }}>
+                {shown.map((entry, index) => {
+                    const isLastRow = remaining === 0 && index === shown.length - 1
+                    return (
+                        <UiEntity
+                            key={entry.userId}
+                            uiTransform={{ width: '100%', height: rowHeight, alignItems: 'center', margin: { bottom: isLastRow ? 0 : REVEAL_NAME_ROW_GAP } }}
+                        >
+                            <Label value={entry.name} fontSize={wide ? 18 : 14} color={Color4.White()} />
+                        </UiEntity>
+                    )
+                })}
+                {remaining > 0 && (
+                    <UiEntity uiTransform={{ width: '100%', height: rowHeight, alignItems: 'center' }}>
+                        <Label value={`+${remaining} MORE`} fontSize={wide ? 15 : 12} color={MUTED} />
+                    </UiEntity>
+                )}
+            </UiEntity>
         </UiEntity>
     )
 }
