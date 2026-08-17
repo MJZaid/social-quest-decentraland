@@ -1,10 +1,19 @@
 import { SharedPhase, RoundStateValue } from './networkRoundState'
 import { getNewConnectionsFromLastRound, getTotalConnections } from './connectionsManager'
 
-/** How many round ticks (~seconds) a celebration stays visible once triggered. */
-const CELEBRATION_TICKS = 3
+/**
+ * How many round ticks (~seconds) a celebration stays visible once triggered.
+ * Requested lifetime is 4.5s, but the tick loop this is driven from
+ * (roundManager's 1000ms interval) only supports whole-tick granularity - 5 is
+ * the nearest achievable value (any value in (4, 5] clears after exactly the
+ * same number of tick() calls as 5 does), rounded up rather than down to 4 per
+ * the "disappear too quickly" motivation for this change.
+ */
+export const CELEBRATION_TICKS = 5
 
 export interface CelebrationSnapshot {
+    /** Stable identity for this celebration instance - lets a consumer (e.g. socialCelebrationQueue.ts) dedupe/merge without re-deriving round-awareness itself. */
+    roundId: number
     newUserIds: string[]
     totalBefore: number
     totalAfter: number
@@ -79,5 +88,10 @@ export function tick(state: RoundStateValue): void {
 
 export function getCelebrationSnapshot(): CelebrationSnapshot | null {
     if (activeCelebration === null) return null
-    return { newUserIds: activeCelebration.newUserIds, totalBefore: activeCelebration.totalBefore, totalAfter: activeCelebration.totalAfter }
+    return {
+        roundId: activeCelebration.roundId,
+        newUserIds: activeCelebration.newUserIds,
+        totalBefore: activeCelebration.totalBefore,
+        totalAfter: activeCelebration.totalAfter
+    }
 }

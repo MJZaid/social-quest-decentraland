@@ -5,6 +5,9 @@ import { getRoundState, writeRoundState, startRoundStateSync, SharedPhase, NO_QU
 import { getActiveUserIds, setJoined } from './networkPlayerSession'
 import { processRoundState } from './connectionsManager'
 import { tick as tickConnectionCelebration } from './connectionCelebration'
+import { evaluateFriendshipLevels } from './friendshipManager'
+import { tick as tickFriendshipCelebration } from './friendshipCelebration'
+import { tick as tickSocialCelebrationQueue } from './socialCelebrationQueue'
 import {
     AnswerOption,
     PlayerAnswerValue,
@@ -102,6 +105,8 @@ class RoundManager {
     private intervalId: number | null = null
 
     private selectedOption: Option | null = null
+    /** The roundId `selectedOption` was actually chosen for - lets getSnapshot() reject a stale selection the instant state.roundId advances, without depending on the ~1s tick loop having already run syncLocalBookkeeping()'s reset. */
+    private selectedOptionRoundId: number | null = null
     private lastObservedRoundId: number | null = null
     private lastObservedPhase: SharedPhase | null = null
 
@@ -129,6 +134,7 @@ class RoundManager {
         if (!getActiveUserIds(state.roundId).includes(myProfile.userId)) return
         if (this.selectedOption !== null) return
         this.selectedOption = option
+        this.selectedOptionRoundId = state.roundId
     }
 
     getSnapshot(): RoundSnapshot {
@@ -150,6 +156,13 @@ class RoundManager {
         const state = getRoundState()
         const question = state.questionIndex === NO_QUESTION ? null : QUESTIONS[state.questionIndex]
         const isActiveNow = getActiveUserIds(state.roundId).includes(myProfile.userId)
+        // A selection only belongs to the round it was made for. this.selectedOption is only
+        // reset to null by the ~1s tick loop (syncLocalBookkeeping), but getSnapshot() can be
+        // read by the UI many times per second and state.roundId can already reflect a new
+        // round before that reset runs - without this check, a stale 'A'/'B' from the PREVIOUS
+        // round could be paired with the NEW round's question, wrongly rendering it as already
+        // answered.
+        const selectedOption = this.selectedOptionRoundId === state.roundId ? this.selectedOption : null
 
         let isRevealing = false
         let reveal: RevealData | null = null
@@ -177,7 +190,7 @@ class RoundManager {
             isSyncing: false,
             activeParticipantCount,
             question,
-            selectedOption: this.selectedOption,
+            selectedOption,
             secondsLeft: state.secondsLeft,
             isRevealing,
             reveal,
@@ -203,7 +216,13 @@ class RoundManager {
         this.syncLocalBookkeeping(stateAfterElection)
         this.maybePublishAnswer(stateAfterElection)
         processRoundState(stateAfterElection)
+        evaluateFriendshipLevels()
+        tickFriendshipCelebration(stateAfterElection)
         tickConnectionCelebration(stateAfterElection)
+        // Deliberately unconditional (no phase check, no state argument) - the queue must
+        // keep capturing/advancing regardless of round phase so a captured celebration is
+        // never lost just because the round moves on to ANSWERING while it's still queued.
+        tickSocialCelebrationQueue()
 
         if (!amICoordinator) return // Followers never write round/timer state.
 
