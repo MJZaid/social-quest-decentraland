@@ -4,7 +4,7 @@ import { engine, UiCanvasInformation } from '@dcl/sdk/ecs'
 import { roundManager } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
-import { getTotalConnections, getRecentConnections, getDisplayNameFor, getConnection } from './connectionsManager'
+import { getTotalConnections, getRecentConnections, getDisplayNameFor, getConnection, getAllConnections } from './connectionsManager'
 import { getFriendshipLevel } from './friendshipManager'
 import {
     getPresentedCelebration,
@@ -35,6 +35,11 @@ const QUESTMATE_FALLBACK = 'Questmate'
 
 /** Collapse/expand is presentation-only and local to this client - never synced. Default: collapsed. */
 let socialHudExpanded = false
+
+/** Whether the Social Agenda ("VIEW ALL CONNECTIONS") overlay is open - presentation-only, local, never synced. Default: closed. */
+let socialAgendaOpen = false
+/** Current 0-based Agenda page - reset to 0 every time the Agenda is opened, so a re-open never resumes on a stale page. */
+let socialAgendaPage = 0
 
 /**
  * Below this render scale, panels declared at their normal size (the 280-wide HUD
@@ -74,6 +79,29 @@ const HUD_EXPANDED_WIDTH_COMPACT = 230
 
 /** Names shown before collapsing the rest into "+N" - shared by both compact toasts. */
 const MAX_CELEBRATION_NAMES = 3
+
+/**
+ * Social Agenda ("VIEW ALL CONNECTIONS") panel width - it's a user-requested,
+ * temporary central overlay (not the persistent HUD), so it's allowed to be
+ * noticeably larger than the HUD panel while still leaving scene visible
+ * around it. WIDE/COMPACT only, no separate very-small tier: pagination (see
+ * AGENDA_ROWS_PER_PAGE) already keeps the panel's height bounded regardless of
+ * canvas size, so a third width tier isn't needed to stay safe.
+ */
+const AGENDA_WIDTH_WIDE = 640
+const AGENDA_WIDTH_COMPACT = 460
+
+/**
+ * Entries shown per Agenda page. Chosen instead of a scrolling container: the
+ * installed SDK (@dcl/react-ecs 7.26.0) only exposes a raw Yoga `overflow:
+ * 'scroll'` style flag with no programmatic scroll-position/scrollbar API, and
+ * this project already hit one real Explorer-runtime regression from a
+ * typings-only-verified component (InteractableArea). Prev/Next pagination
+ * built from the same plain UiEntity/Button primitives already proven
+ * throughout this file is the reliable choice here, per the explicit
+ * "reliability over sophistication" guidance for this feature.
+ */
+const AGENDA_ROWS_PER_PAGE = 6
 
 /**
  * Reads the SDK-reported live UI canvas size (UiCanvasInformation on engine.RootEntity)
@@ -123,6 +151,16 @@ export const uiMenu = () => {
     // celebration card side by side and are left alone.
     if (socialHudExpanded && (verySmall || (!wide && (round.phase === 'answering' || celebrating)))) {
         socialHudExpanded = false
+    }
+
+    // Gameplay always wins: if the Social Agenda is open and the player's own question
+    // now needs attention, close it automatically rather than let it compete for the
+    // screen. Opening it in the first place is separately guarded the same way (see
+    // SocialHud's VIEW ALL CONNECTIONS handler) - this only handles the case where
+    // ANSWERING begins WHILE it's already open. Local UI state only; never touches
+    // joined status or round lifecycle.
+    if (socialAgendaOpen && round.phase === 'answering') {
+        socialAgendaOpen = false
     }
 
     return (
@@ -194,8 +232,12 @@ export const uiMenu = () => {
                     alignItems: 'center'
                 }}
             >
-                {/* Presence in the scene is not participation: outside the Quest Zone, show nothing at all */}
-                {session.inZone && (
+                {/* Presence in the scene is not participation: outside the Quest Zone, show nothing at all.
+                    Also suppressed while the Social Agenda is open - both panels are translucent, so
+                    rendering them together let the gameplay panel show through underneath the Agenda.
+                    The Agenda temporarily owns this central area instead; gameplay reappears the instant
+                    socialAgendaOpen goes false (including via the existing ANSWERING auto-close rule). */}
+                {session.inZone && !socialAgendaOpen && (
                     <UiEntity
                         uiTransform={{
                             width: 760,
@@ -248,6 +290,19 @@ export const uiMenu = () => {
                     </UiEntity>
                 )}
             </UiEntity>
+
+            {/* Social Agenda - a user-requested temporary overlay, rendered last so it sits on
+                top of the gameplay panel when both happen to be visible. Centered the same way
+                the gameplay panel itself is (full-screen wrapper, justifyContent/alignItems
+                center) - a proven technique already used above, not a new positioning system.
+                Deliberately does not coordinate with the celebration toast in the fixed upper
+                row: that row is untouched and keeps rendering normally regardless of Agenda's
+                open state (see report for why this is the chosen simplest-safe behavior). */}
+            {socialAgendaOpen && (
+                <UiEntity uiTransform={{ positionType: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                    <SocialAgenda wide={wide} />
+                </UiEntity>
+            )}
         </ScreenInsetArea>
     )
 }
@@ -500,6 +555,138 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
                                 </UiEntity>
                             )
                         })}
+                    </UiEntity>
+                )}
+
+                {/* Opens the full Social Agenda overlay. Guarded the same way ANSWERING already
+                    forces this whole panel collapsed elsewhere: if a question is currently being
+                    answered, pressing this does nothing rather than opening a panel that would
+                    compete with it. Collapses this small panel back to the pill first, since the
+                    Agenda already shows everything it does (and more) in its own larger view. */}
+                <Button
+                    value="VIEW ALL CONNECTIONS"
+                    variant="secondary"
+                    fontSize={16}
+                    uiTransform={{ width: '100%', height: 56, margin: { top: 14 } }}
+                    onMouseDown={() => {
+                        if (roundManager.getSnapshot().phase === 'answering') return
+                        socialHudExpanded = false
+                        socialAgendaPage = 0
+                        socialAgendaOpen = true
+                    }}
+                />
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * Full-list overlay opened via SocialHud's VIEW ALL CONNECTIONS button. Reads
+ * connectionsManager's existing getAllConnections() directly - no second list of
+ * relationships, no new Connection state. Ordering is whatever getAllConnections()
+ * already returns: Map insertion order, i.e. the order each partner was first met
+ * in, oldest-first - a genuinely stable, deterministic order with no invented
+ * recency/ranking system layered on top (see report). Friendship level is the same
+ * pure getFriendshipLevel(roundsTogether) lookup used everywhere else - no
+ * threshold logic duplicated here. Paginated rather than scrolled - see
+ * AGENDA_ROWS_PER_PAGE's comment for why.
+ */
+const SocialAgenda = ({ wide }: { wide: boolean }) => {
+    const allConnections = getAllConnections()
+    const totalPages = Math.max(1, Math.ceil(allConnections.length / AGENDA_ROWS_PER_PAGE))
+    const pageStart = socialAgendaPage * AGENDA_ROWS_PER_PAGE
+    const pageEntries = allConnections.slice(pageStart, pageStart + AGENDA_ROWS_PER_PAGE)
+    const canGoPrevious = socialAgendaPage > 0
+    const canGoNext = socialAgendaPage < totalPages - 1
+
+    const close = () => {
+        socialAgendaOpen = false
+    }
+
+    return (
+        <UiEntity
+            uiTransform={{ flexDirection: 'column', width: wide ? AGENDA_WIDTH_WIDE : AGENDA_WIDTH_COMPACT }}
+            uiBackground={{ color: PANEL_BACKGROUND }}
+        >
+            {/* Header is the whole-row tap target to close - generous padding (not just the "✕"
+                glyph), same proven pattern as SocialHud's own header. This is the only close
+                control now; no footer bar (see report). */}
+            <UiEntity
+                uiTransform={{
+                    width: '100%',
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: { top: 18, bottom: 18, left: 20, right: 20 }
+                }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={close}
+            >
+                <Label value="MY CONNECTIONS" fontSize={22} color={Color4.create(1, 0.85, 0.2, 1)} />
+                <Label value="✕" fontSize={22} color={Color4.White()} />
+            </UiEntity>
+
+            <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', padding: { top: 16, bottom: 20, left: 20, right: 20 } }}>
+                {allConnections.length === 0 ? (
+                    <UiEntity uiTransform={COLUMN_CENTERED}>
+                        <Label value="No Connections yet." fontSize={20} color={Color4.White()} uiTransform={{ margin: { bottom: 8 } }} />
+                        <Label
+                            value="Play Social Quest with someone to make your first Connection."
+                            fontSize={16}
+                            color={MUTED}
+                            textAlign="middle-center"
+                            textWrap="wrap"
+                        />
+                    </UiEntity>
+                ) : (
+                    <UiEntity uiTransform={{ flexDirection: 'column', width: '100%' }}>
+                        <Label
+                            value={`${allConnections.length} CONNECTION${allConnections.length === 1 ? '' : 'S'}`}
+                            fontSize={16}
+                            color={MUTED}
+                            uiTransform={{ margin: { bottom: 14 } }}
+                        />
+                        {pageEntries.map((connection) => {
+                            const name = getDisplayNameFor(connection.otherUserId) ?? QUESTMATE_FALLBACK
+                            const level = getFriendshipLevel(connection.roundsTogether)
+                            return (
+                                <UiEntity key={connection.otherUserId} uiTransform={{ width: '100%', flexDirection: 'column', margin: { bottom: 12 } }}>
+                                    <Label value={name} fontSize={20} color={Color4.White()} />
+                                    {level !== null && (
+                                        <Label
+                                            value={`✦ ${level} · ${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
+                                            fontSize={16}
+                                            color={Color4.create(0.4, 0.75, 1, 1)}
+                                            textWrap="wrap"
+                                        />
+                                    )}
+                                </UiEntity>
+                            )
+                        })}
+
+                        {totalPages > 1 && (
+                            <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', margin: { top: 8 } }}>
+                                <UiEntity
+                                    uiTransform={{ padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+                                    uiBackground={{ color: PANEL_BACKGROUND }}
+                                    onMouseDown={() => {
+                                        if (canGoPrevious) socialAgendaPage -= 1
+                                    }}
+                                >
+                                    <Label value="PREVIOUS" fontSize={16} color={canGoPrevious ? Color4.White() : MUTED} />
+                                </UiEntity>
+                                <Label value={`${socialAgendaPage + 1} / ${totalPages}`} fontSize={16} color={MUTED} />
+                                <UiEntity
+                                    uiTransform={{ padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+                                    uiBackground={{ color: PANEL_BACKGROUND }}
+                                    onMouseDown={() => {
+                                        if (canGoNext) socialAgendaPage += 1
+                                    }}
+                                >
+                                    <Label value="NEXT" fontSize={16} color={canGoNext ? Color4.White() : MUTED} />
+                                </UiEntity>
+                            </UiEntity>
+                        )}
                     </UiEntity>
                 )}
             </UiEntity>
