@@ -33,6 +33,13 @@ let recentConnectionUserIds: string[] = []
 /** Presentation-only cache: userId -> best-resolved display name, populated while that player is provably present. */
 const displayNameCache = new Map<string, string>()
 
+/** otherUserId + same/different outcome for every partner actually incremented (not just re-scanned) during the round currentRoundId currently reflects - same reset lifetime as newConnectionsThisRound. Used only by the persistence layer (persistenceManager.ts) to report deltas exactly once per round; gameplay/celebrations never read this. */
+export interface ProcessedRoundPair {
+    otherUserId: string
+    same: boolean
+}
+let processedThisRound: ProcessedRoundPair[] = []
+
 /**
  * Re-evaluates this client's own Connections for the current round on every RESULT
  * tick (called from RoundManager.tick(), reusing its existing 1s cadence - no new
@@ -50,6 +57,7 @@ export function processRoundState(state: RoundStateValue): void {
     if (state.roundId !== currentRoundId) {
         currentRoundId = state.roundId
         newConnectionsThisRound = []
+        processedThisRound = []
     }
 
     const answers = getAnswersForRound(state.roundId)
@@ -60,10 +68,13 @@ export function processRoundState(state: RoundStateValue): void {
         if (other.userId === myProfile.userId) continue
         if (other.option === AnswerOption.NO_ANSWER) continue
 
-        const isNew = recordRound(other.userId, state.roundId, myAnswer.option, other.option)
+        const { isNew, applied } = recordRound(other.userId, state.roundId, myAnswer.option, other.option)
         if (isNew) {
             newConnectionsThisRound.push(other.userId)
             addToRecentConnections(other.userId)
+        }
+        if (applied) {
+            processedThisRound.push({ otherUserId: other.userId, same: myAnswer.option === other.option })
         }
         // Attempted for every encounter (not just isNew) so a name that failed to resolve on
         // the very first round together can still be picked up on a later one - cheap no-op
@@ -97,9 +108,14 @@ function cacheDisplayNameIfNeeded(userId: string): void {
  * one lastProcessedRoundId per unique partner, not one marker per round ever played.
  * Returns true only the first time this partner is ever recorded (a brand new Connection).
  */
-function recordRound(otherUserId: string, roundId: number, myOption: AnswerOption, otherOption: AnswerOption): boolean {
+function recordRound(
+    otherUserId: string,
+    roundId: number,
+    myOption: AnswerOption,
+    otherOption: AnswerOption
+): { isNew: boolean; applied: boolean } {
     const existing = connections.get(otherUserId)
-    if (existing && existing.lastProcessedRoundId === roundId) return false // already counted this round for this partner
+    if (existing && existing.lastProcessedRoundId === roundId) return { isNew: false, applied: false } // already counted this round for this partner
 
     const isNew = !existing
     const record: InternalConnection = existing ?? { otherUserId, roundsTogether: 0, sameAnswers: 0, differentAnswers: 0, lastProcessedRoundId: -1 }
@@ -113,7 +129,7 @@ function recordRound(otherUserId: string, roundId: number, myOption: AnswerOptio
     record.lastProcessedRoundId = roundId
 
     connections.set(otherUserId, record)
-    return isNew
+    return { isNew, applied: true }
 }
 
 export function getTotalConnections(): number {
@@ -148,4 +164,49 @@ export function getRecentConnections(limit: number = MAX_RECENT_CONNECTIONS): st
 /** The cached display name for `userId`, or null if it was never resolvable while that player was present. Presentation only - never the identity key. */
 export function getDisplayNameFor(userId: string): string | null {
     return displayNameCache.get(userId) ?? null
+}
+
+/**
+ * Seeds `connections` from a previously-persisted profile (persistenceManager.ts),
+ * called once at startup before any round is processed this session. Never
+ * overwrites an entry that already exists (defensive - in the normal case
+ * `connections` is empty when this runs, since hydration completes before the
+ * player has played any round this session).
+ *
+ * lastProcessedRoundId is set to -1 (the same sentinel a brand-new live
+ * connection starts with), never to a value from a previous session - a
+ * previous session's roundId has no relationship to this session's roundId
+ * numbering, so reusing it could wrongly suppress (or double-count) this
+ * session's very first real round with that partner. This is also exactly why
+ * `newConnectionsThisRound`/celebrations are never triggered by hydration: it
+ * only ever calls connections.set() directly, never recordRound() - the
+ * NEW_CONNECTION celebration path is untouched, and friendshipManager's own
+ * "first observation this session" rule (see friendshipManager.ts) naturally
+ * suppresses a false level-up celebration the first time it evaluates a
+ * hydrated partner's already-high roundsTogether.
+ */
+export function hydrateConnections(records: ConnectionRecord[]): void {
+    for (const record of records) {
+        if (connections.has(record.otherUserId)) continue
+        connections.set(record.otherUserId, {
+            otherUserId: record.otherUserId,
+            roundsTogether: record.roundsTogether,
+            sameAnswers: record.sameAnswers,
+            differentAnswers: record.differentAnswers,
+            lastProcessedRoundId: -1
+        })
+    }
+}
+
+/**
+ * The partners actually incremented (not just re-scanned) during the round
+ * `currentRoundId` currently reflects, plus that roundId itself so a caller can
+ * verify it's reading the round it expects. Used only by persistenceManager.ts
+ * to report deltas to the authoritative server exactly once per round - see
+ * processRoundState()'s reset timing for why this stays valid through the
+ * following WAITING/ANSWERING window, not just during RESULT itself.
+ */
+export function getProcessedThisRound(): { roundId: number; entries: ProcessedRoundPair[] } | null {
+    if (currentRoundId === null) return null
+    return { roundId: currentRoundId, entries: [...processedThisRound] }
 }

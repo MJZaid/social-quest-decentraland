@@ -52,6 +52,13 @@
     "ALLOW_TO_TRIGGER_AVATAR_EMOTE",
     "ALLOW_TO_MOVE_PLAYER_INSIDE_SCENE"
   ],
+  "authoritativeMultiplayer": true,
+  "worldConfiguration": {
+    "name": "socialquest.dcl.eth",
+    "placesConfig": {
+      "optOut": false
+    }
+  },
   "featureToggles": {
     "voiceChat": "enabled",
     "portableExperiences": "enabled",
