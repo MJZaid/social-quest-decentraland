@@ -165,7 +165,7 @@ export interface HydrationResult {
  * async and gameplay is never blocked on it - so a round can genuinely complete
  * locally with a partner BEFORE this runs for that same partner.
  *
- * Two cases, handled differently:
+ * Three cases, handled differently:
  *
  * - No local entry yet (the common case): seed fresh from the persisted values,
  *   with lastProcessedRoundId = -1 (the same sentinel a brand-new live connection
@@ -173,31 +173,45 @@ export interface HydrationResult {
  *   has no relationship to this session's and could wrongly suppress or
  *   double-count this session's first real round with that partner.
  *
- * - A local entry already exists (this session already recorded a round with
- *   this partner before the persisted baseline arrived): the persisted counts
- *   are ADDED on top of the local ones, never overwritten and never dropped -
- *   overwriting would silently lose this session's already-celebrated progress;
- *   skipping the persisted data (the previous behavior) would silently lose the
- *   player's entire history instead. lastProcessedRoundId is left untouched in
- *   this case, preserving this session's own round-dedup state.
+ * - A local entry already exists AND `replaceInstead` says the persisted
+ *   snapshot already reflects it: the server's own independent round-detection
+ *   (see persistenceManager.ts) can persist a round before this client's own
+ *   LOAD response arrives for it - in that case the persisted total already
+ *   IS local+persisted, and adding again would double-count. The caller is
+ *   responsible for that determination (it requires knowing the server's
+ *   session id and event log, which are persistence-layer concerns this
+ *   module has no reason to know about); this function just trusts the flag.
+ *
+ * - A local entry already exists and `replaceInstead` does NOT cover it: the
+ *   persisted counts are ADDED on top of the local ones, never overwritten and
+ *   never dropped - overwriting would silently lose this session's
+ *   already-celebrated progress; dropping the persisted data (an earlier bug)
+ *   would silently lose the player's entire history instead. lastProcessedRoundId
+ *   is left untouched in both existing-entry cases, preserving this session's
+ *   own round-dedup state.
  *
  * Never triggers the NEW_CONNECTION celebration (only ever calls connections.set()
  * directly, never recordRound()). The fresh-hydration case never triggers a false
  * Friendship celebration either, via friendshipManager's own "first observation
- * this session" rule. The merge case is different: acquiring 50 persisted rounds
- * on top of 1 local round could look like a genuine level-up if not handled - see
- * wasMerge in the returned result, and friendshipManager.acknowledgeLevelWithoutCelebration,
- * which the caller (persistenceManager.ts) uses to reconcile the baseline for
- * exactly this case.
+ * this session" rule. The other two cases can still involve a jump in
+ * roundsTogether that isn't a genuine level-up - see wasMerge in the returned
+ * result, and friendshipManager.acknowledgeLevelWithoutCelebration, which the
+ * caller uses to reconcile the baseline for exactly that.
  */
-export function hydrateConnections(records: ConnectionRecord[]): HydrationResult[] {
+export function hydrateConnections(records: ConnectionRecord[], replaceInstead: ReadonlySet<string> = new Set()): HydrationResult[] {
     const results: HydrationResult[] = []
     for (const record of records) {
         const existing = connections.get(record.otherUserId)
         if (existing) {
-            existing.roundsTogether += record.roundsTogether
-            existing.sameAnswers += record.sameAnswers
-            existing.differentAnswers += record.differentAnswers
+            if (replaceInstead.has(record.otherUserId)) {
+                existing.roundsTogether = record.roundsTogether
+                existing.sameAnswers = record.sameAnswers
+                existing.differentAnswers = record.differentAnswers
+            } else {
+                existing.roundsTogether += record.roundsTogether
+                existing.sameAnswers += record.sameAnswers
+                existing.differentAnswers += record.differentAnswers
+            }
             results.push({ otherUserId: record.otherUserId, roundsTogether: existing.roundsTogether, wasMerge: true })
         } else {
             connections.set(record.otherUserId, {
@@ -211,4 +225,10 @@ export function hydrateConnections(records: ConnectionRecord[]): HydrationResult
         }
     }
     return results
+}
+
+/** The roundId `otherUserId`'s connection was last locally recorded for THIS session, or null if no local entry exists yet. Exposed only for the persistence layer's hydration-race reconciliation (see persistenceManager.ts) - gameplay/UI never needs this. */
+export function getLastProcessedRoundId(otherUserId: string): number | null {
+    const record = connections.get(otherUserId)
+    return record ? record.lastProcessedRoundId : null
 }

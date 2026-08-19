@@ -20,13 +20,6 @@ export interface PersistedSocialQuestProfileV1 {
     recentProcessedEventIds: string[]
 }
 
-/** A single round's outcome with one partner, as reported client -> server. Never a raw counter - only ever +1 worth of information per event, so the server can validate it and never trust an arbitrary total. */
-export interface PersistedConnectionDelta {
-    otherUserId: string
-    /** true if both players picked the same option this round. */
-    same: boolean
-}
-
 export const PERSISTENCE_SCHEMA_VERSION = 1
 export const STORAGE_KEY = 'socialQuestSocialProfileV1'
 /** Keeps Storage bounded - large enough to absorb realistic reconnect/retry replay windows, small enough to never grow unbounded. */
@@ -41,6 +34,18 @@ export function emptyProfile(): PersistedSocialQuestProfileV1 {
 /** Wallet addresses/userIds are case-insensitive - every persistence-layer read/write goes through this so a mixed-case caller can never split into two different records. */
 export function normalizeUserId(userId: string): string {
     return userId.trim().toLowerCase()
+}
+
+/**
+ * Order-independent pair key so `roundId:A,B` and `roundId:B,A` always mean
+ * the same event. Shared by both server (persisting a pair's outcome) and
+ * client (reconstructing the same event id to check whether a locally-known
+ * round is already reflected in a just-loaded persisted snapshot - see
+ * persistenceManager.ts's hydration-race handling) - must stay byte-identical
+ * on both sides, hence living here rather than being duplicated.
+ */
+export function sortedPairKey(a: string, b: string): string {
+    return [a, b].sort().join(',')
 }
 
 function isFiniteNonNegativeInt(value: unknown): value is number {

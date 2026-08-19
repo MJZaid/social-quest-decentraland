@@ -20,7 +20,9 @@ const PersistenceMessages = {
     profileResponse: Schemas.Map({
         found: Schemas.Boolean,
         dataJson: Schemas.String,
-        error: Schemas.String
+        error: Schemas.String,
+        /** Lets the client reconstruct the same event-id format the server uses for dedup, to resolve the hydration/local-progress race - see persistenceManager.ts. Identifies a server process, nothing sensitive. */
+        serverSessionId: Schemas.String
     })
 }
 
