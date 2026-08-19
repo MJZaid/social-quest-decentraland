@@ -115,11 +115,44 @@ async function saveProfile(address: string, profile: PersistedSocialQuestProfile
     }
 }
 
+/**
+ * Global write queue: guarantees this server process never has more than one
+ * Storage.player.set() in flight at a time, no matter how many players/pairs
+ * a single RESULT scan produces. Needed because the local preview's Storage
+ * mock (sdk-commands' server-storage.json) does a non-atomic, whole-file
+ * read-modify-write per call with no locking - two concurrent set() calls can
+ * read the same stale snapshot and the second's write silently clobbers the
+ * first's. Chaining every write through one FIFO promise tail serializes them
+ * app-side regardless of what the storage backend itself does, so the same
+ * protection also holds against production's real backend without needing to
+ * assume anything about it.
+ *
+ * A rejected/failed task can never wedge the queue for later ones: the tail
+ * is always advanced via a handler that resolves either way. In practice
+ * saveProfile() never throws (it already catches internally and resolves to
+ * false), so this is defense in depth, not the primary safety net.
+ */
+let saveQueueTail: Promise<unknown> = Promise.resolve()
+
+function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
+    const runTask = saveQueueTail.then(task)
+    saveQueueTail = runTask.then(
+        () => undefined,
+        () => undefined
+    )
+    return runTask
+}
+
 /** Applies one round's delta to a single player's own profile against `otherUserId`, durably deduped via that player's own persisted recentProcessedEventIds - independent of the in-memory fast path, so this stays correct even across a server restart. */
 async function applyDeltaToPlayer(address: string, otherUserId: string, same: boolean, eventId: string): Promise<void> {
     const profile = await loadProfile(address)
     if (hasProcessedEventId(profile, eventId)) return // already applied - durable, cross-restart dedup
 
+    // Mutated synchronously, immediately - before this event's write is even
+    // queued - so a second event for the same player (another pair, or a
+    // later RESULT tick) always builds on top of this one's result rather
+    // than a stale snapshot, regardless of how long this event's turn in the
+    // write queue below ends up taking.
     const record = profile.connections[otherUserId] ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
     record.roundsTogether += 1
     if (same) {
@@ -130,13 +163,25 @@ async function applyDeltaToPlayer(address: string, otherUserId: string, same: bo
     profile.connections[otherUserId] = record
     pushProcessedEventId(profile, eventId)
 
-    await saveProfile(address, profile)
+    await enqueueWrite(async () => {
+        // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified. Logged
+        // here (inside the queued task, not before enqueueing) so "starting"
+        // always reflects this write's actual turn, not just when it joined the queue.
+        console.log(`[Persistence][SERVER][TEST] Storage.player.set starting for ${address} (roundsTogether now ${record.roundsTogether})`)
+        const ok = await saveProfile(address, profile)
+        console.log(`[Persistence][SERVER][TEST] Storage.player.set result for ${address}: ${ok ? 'OK' : 'FAILED'}`)
+    })
 }
 
 /** Persists one validated pair's outcome for BOTH players symmetrically - each player's own profile gets a delta against the other, under the exact same eventId, so the pair as a whole is one atomic unit of dedup even though it lives in two separate Storage.player records. */
 async function processRoundPair(roundId: number, userA: string, userB: string, same: boolean): Promise<void> {
     const eventId = `${SERVER_SESSION_ID}:${roundId}:${sortedPairKey(userA, userB)}`
-    if (processedPairEventsInMemory.has(eventId)) return
+    // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified.
+    console.log(`[Persistence][SERVER][TEST] Pair detected: ${userA} <-> ${userB} same=${same} eventId=${eventId}`)
+    if (processedPairEventsInMemory.has(eventId)) {
+        console.log(`[Persistence][SERVER][TEST] Pair already processed this server session - skipping (dedup)`)
+        return
+    }
     processedPairEventsInMemory.add(eventId)
 
     try {
@@ -176,10 +221,19 @@ async function processRoundPair(roundId: number, userA: string, userB: string, s
  * which is also why the "last round before leaving" problem doesn't apply
  * here: persistence happens live, during RESULT, not after the next round starts.
  */
+let lastLoggedResultRoundId: number | null = null
+
 function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
     if (state.phase !== SharedPhase.RESULT) return
 
     const answers = getAnswersForRound(state.roundId).filter((answer) => answer.option !== AnswerOption.NO_ANSWER)
+
+    // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified. Logged
+    // once per roundId (not every tick) to avoid spamming while RESULT re-scans.
+    if (lastLoggedResultRoundId !== state.roundId) {
+        lastLoggedResultRoundId = state.roundId
+        console.log(`[Persistence][SERVER][TEST] RESULT detected for round ${state.roundId} - ${answers.length} valid answer(s) so far`)
+    }
 
     for (let i = 0; i < answers.length; i++) {
         for (let j = i + 1; j < answers.length; j++) {
