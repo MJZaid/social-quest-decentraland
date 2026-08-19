@@ -201,10 +201,16 @@ export const uiMenu = () => {
     // Gameplay always wins: if the Social Agenda is open and the player's own question
     // now needs attention, close it automatically rather than let it compete for the
     // screen. Opening it in the first place is separately guarded the same way (see
-    // SocialHud's VIEW ALL CONNECTIONS handler) - this only handles the case where
-    // ANSWERING begins WHILE it's already open. Local UI state only; never touches
-    // joined status or round lifecycle.
-    if (socialAgendaOpen && round.phase === 'answering') {
+    // SocialHud's VIEW ALL CONNECTIONS handler). Two triggers: ANSWERING begins WHILE
+    // it's already open (the original rule), and - since the gameplay panel at
+    // `session.inZone && !socialAgendaOpen` below is otherwise fully hidden behind an
+    // open Agenda - walking into the Quest Zone *before joining* with the Agenda left
+    // open from outside, which used to leave JOIN permanently hidden until the player
+    // closed it manually. Deliberately NOT triggered by session.inZone alone once
+    // joined: the Agenda must stay openable during WAITING/RESULT for an already-joined
+    // player, same as before this fix. Local UI state only; never touches joined status
+    // or round lifecycle.
+    if (socialAgendaOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
         socialAgendaOpen = false
     }
 
