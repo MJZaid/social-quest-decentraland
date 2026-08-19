@@ -107,3 +107,20 @@ export function evaluateFriendshipLevels(): void {
 export function getFriendshipLevelUpsFromLastTick(): FriendshipLevelUpEvent[] {
     return [...lastTickEvents]
 }
+
+/**
+ * Sets the acknowledged baseline for a partner directly, without emitting a
+ * level-up event. Used only by persistenceManager.ts, only for the "merge"
+ * case of connectionsManager.hydrateConnections() - when persisted rounds are
+ * added on top of a connection this session had already locally recorded
+ * (and therefore already acknowledged at its pre-hydration level). Without
+ * this, the jump from e.g. 1 to 54 roundsTogether would look like a genuine
+ * level-up the next evaluateFriendshipLevels() tick, when it's really just
+ * hydration catching up. Never called for a brand-new hydration - that case
+ * is already correctly silent via the "first observation" rule above.
+ */
+export function acknowledgeLevelWithoutCelebration(otherUserId: string, roundsTogether: number): void {
+    const definition = getLevelDefinition(roundsTogether)
+    if (definition === null) return
+    acknowledgedLevels.set(otherUserId, definition)
+}

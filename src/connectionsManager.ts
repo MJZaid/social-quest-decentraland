@@ -33,13 +33,6 @@ let recentConnectionUserIds: string[] = []
 /** Presentation-only cache: userId -> best-resolved display name, populated while that player is provably present. */
 const displayNameCache = new Map<string, string>()
 
-/** otherUserId + same/different outcome for every partner actually incremented (not just re-scanned) during the round currentRoundId currently reflects - same reset lifetime as newConnectionsThisRound. Used only by the persistence layer (persistenceManager.ts) to report deltas exactly once per round; gameplay/celebrations never read this. */
-export interface ProcessedRoundPair {
-    otherUserId: string
-    same: boolean
-}
-let processedThisRound: ProcessedRoundPair[] = []
-
 /**
  * Re-evaluates this client's own Connections for the current round on every RESULT
  * tick (called from RoundManager.tick(), reusing its existing 1s cadence - no new
@@ -57,7 +50,6 @@ export function processRoundState(state: RoundStateValue): void {
     if (state.roundId !== currentRoundId) {
         currentRoundId = state.roundId
         newConnectionsThisRound = []
-        processedThisRound = []
     }
 
     const answers = getAnswersForRound(state.roundId)
@@ -68,13 +60,10 @@ export function processRoundState(state: RoundStateValue): void {
         if (other.userId === myProfile.userId) continue
         if (other.option === AnswerOption.NO_ANSWER) continue
 
-        const { isNew, applied } = recordRound(other.userId, state.roundId, myAnswer.option, other.option)
+        const isNew = recordRound(other.userId, state.roundId, myAnswer.option, other.option)
         if (isNew) {
             newConnectionsThisRound.push(other.userId)
             addToRecentConnections(other.userId)
-        }
-        if (applied) {
-            processedThisRound.push({ otherUserId: other.userId, same: myAnswer.option === other.option })
         }
         // Attempted for every encounter (not just isNew) so a name that failed to resolve on
         // the very first round together can still be picked up on a later one - cheap no-op
@@ -108,14 +97,9 @@ function cacheDisplayNameIfNeeded(userId: string): void {
  * one lastProcessedRoundId per unique partner, not one marker per round ever played.
  * Returns true only the first time this partner is ever recorded (a brand new Connection).
  */
-function recordRound(
-    otherUserId: string,
-    roundId: number,
-    myOption: AnswerOption,
-    otherOption: AnswerOption
-): { isNew: boolean; applied: boolean } {
+function recordRound(otherUserId: string, roundId: number, myOption: AnswerOption, otherOption: AnswerOption): boolean {
     const existing = connections.get(otherUserId)
-    if (existing && existing.lastProcessedRoundId === roundId) return { isNew: false, applied: false } // already counted this round for this partner
+    if (existing && existing.lastProcessedRoundId === roundId) return false // already counted this round for this partner
 
     const isNew = !existing
     const record: InternalConnection = existing ?? { otherUserId, roundsTogether: 0, sameAnswers: 0, differentAnswers: 0, lastProcessedRoundId: -1 }
@@ -129,7 +113,7 @@ function recordRound(
     record.lastProcessedRoundId = roundId
 
     connections.set(otherUserId, record)
-    return { isNew, applied: true }
+    return isNew
 }
 
 export function getTotalConnections(): number {
@@ -166,47 +150,65 @@ export function getDisplayNameFor(userId: string): string | null {
     return displayNameCache.get(userId) ?? null
 }
 
-/**
- * Seeds `connections` from a previously-persisted profile (persistenceManager.ts),
- * called once at startup before any round is processed this session. Never
- * overwrites an entry that already exists (defensive - in the normal case
- * `connections` is empty when this runs, since hydration completes before the
- * player has played any round this session).
- *
- * lastProcessedRoundId is set to -1 (the same sentinel a brand-new live
- * connection starts with), never to a value from a previous session - a
- * previous session's roundId has no relationship to this session's roundId
- * numbering, so reusing it could wrongly suppress (or double-count) this
- * session's very first real round with that partner. This is also exactly why
- * `newConnectionsThisRound`/celebrations are never triggered by hydration: it
- * only ever calls connections.set() directly, never recordRound() - the
- * NEW_CONNECTION celebration path is untouched, and friendshipManager's own
- * "first observation this session" rule (see friendshipManager.ts) naturally
- * suppresses a false level-up celebration the first time it evaluates a
- * hydrated partner's already-high roundsTogether.
- */
-export function hydrateConnections(records: ConnectionRecord[]): void {
-    for (const record of records) {
-        if (connections.has(record.otherUserId)) continue
-        connections.set(record.otherUserId, {
-            otherUserId: record.otherUserId,
-            roundsTogether: record.roundsTogether,
-            sameAnswers: record.sameAnswers,
-            differentAnswers: record.differentAnswers,
-            lastProcessedRoundId: -1
-        })
-    }
+/** Result of hydrating one partner - see hydrateConnections() below. */
+export interface HydrationResult {
+    otherUserId: string
+    /** The resulting total after hydration (merged, if wasMerge). */
+    roundsTogether: number
+    /** True if a local entry already existed for this partner (rounds played this session, before LOAD resolved) and was merged with the persisted baseline, rather than being a fresh first-time hydration. */
+    wasMerge: boolean
 }
 
 /**
- * The partners actually incremented (not just re-scanned) during the round
- * `currentRoundId` currently reflects, plus that roundId itself so a caller can
- * verify it's reading the round it expects. Used only by persistenceManager.ts
- * to report deltas to the authoritative server exactly once per round - see
- * processRoundState()'s reset timing for why this stays valid through the
- * following WAITING/ANSWERING window, not just during RESULT itself.
+ * Seeds `connections` from a previously-persisted profile (persistenceManager.ts),
+ * called once at startup before any round is processed this session, but LOAD is
+ * async and gameplay is never blocked on it - so a round can genuinely complete
+ * locally with a partner BEFORE this runs for that same partner.
+ *
+ * Two cases, handled differently:
+ *
+ * - No local entry yet (the common case): seed fresh from the persisted values,
+ *   with lastProcessedRoundId = -1 (the same sentinel a brand-new live connection
+ *   starts with) - never a roundId from a previous session, since that numbering
+ *   has no relationship to this session's and could wrongly suppress or
+ *   double-count this session's first real round with that partner.
+ *
+ * - A local entry already exists (this session already recorded a round with
+ *   this partner before the persisted baseline arrived): the persisted counts
+ *   are ADDED on top of the local ones, never overwritten and never dropped -
+ *   overwriting would silently lose this session's already-celebrated progress;
+ *   skipping the persisted data (the previous behavior) would silently lose the
+ *   player's entire history instead. lastProcessedRoundId is left untouched in
+ *   this case, preserving this session's own round-dedup state.
+ *
+ * Never triggers the NEW_CONNECTION celebration (only ever calls connections.set()
+ * directly, never recordRound()). The fresh-hydration case never triggers a false
+ * Friendship celebration either, via friendshipManager's own "first observation
+ * this session" rule. The merge case is different: acquiring 50 persisted rounds
+ * on top of 1 local round could look like a genuine level-up if not handled - see
+ * wasMerge in the returned result, and friendshipManager.acknowledgeLevelWithoutCelebration,
+ * which the caller (persistenceManager.ts) uses to reconcile the baseline for
+ * exactly this case.
  */
-export function getProcessedThisRound(): { roundId: number; entries: ProcessedRoundPair[] } | null {
-    if (currentRoundId === null) return null
-    return { roundId: currentRoundId, entries: [...processedThisRound] }
+export function hydrateConnections(records: ConnectionRecord[]): HydrationResult[] {
+    const results: HydrationResult[] = []
+    for (const record of records) {
+        const existing = connections.get(record.otherUserId)
+        if (existing) {
+            existing.roundsTogether += record.roundsTogether
+            existing.sameAnswers += record.sameAnswers
+            existing.differentAnswers += record.differentAnswers
+            results.push({ otherUserId: record.otherUserId, roundsTogether: existing.roundsTogether, wasMerge: true })
+        } else {
+            connections.set(record.otherUserId, {
+                otherUserId: record.otherUserId,
+                roundsTogether: record.roundsTogether,
+                sameAnswers: record.sameAnswers,
+                differentAnswers: record.differentAnswers,
+                lastProcessedRoundId: -1
+            })
+            results.push({ otherUserId: record.otherUserId, roundsTogether: record.roundsTogether, wasMerge: false })
+        }
+    }
+    return results
 }
