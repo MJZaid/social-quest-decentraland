@@ -8,7 +8,7 @@ import { tick as tickConnectionCelebration } from './connectionCelebration'
 import { evaluateFriendshipLevels } from './friendshipManager'
 import { tick as tickFriendshipCelebration } from './friendshipCelebration'
 import { tick as tickSocialCelebrationQueue } from './socialCelebrationQueue'
-import { tickPersistenceLoad } from './persistenceManager'
+import { tickPersistenceLoad, tickPersistenceCapture } from './persistenceManager'
 import {
     AnswerOption,
     PlayerAnswerValue,
@@ -225,8 +225,10 @@ class RoundManager {
         // never lost just because the round moves on to ANSWERING while it's still queued.
         tickSocialCelebrationQueue()
         // Persistence side channel (LOAD only - see persistenceManager.ts). Never
-        // gates or delays anything above; a no-op once the profile has been requested.
+        // gates or delays anything above; both are no-ops once their own
+        // one-time condition has already fired (profile requested / hydrated).
         tickPersistenceLoad()
+        tickPersistenceCapture(stateAfterElection)
 
         if (!amICoordinator) return // Followers never write round/timer state.
 

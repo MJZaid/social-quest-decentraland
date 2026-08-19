@@ -227,8 +227,3 @@ export function hydrateConnections(records: ConnectionRecord[], replaceInstead: 
     return results
 }
 
-/** The roundId `otherUserId`'s connection was last locally recorded for THIS session, or null if no local entry exists yet. Exposed only for the persistence layer's hydration-race reconciliation (see persistenceManager.ts) - gameplay/UI never needs this. */
-export function getLastProcessedRoundId(otherUserId: string): number | null {
-    const record = connections.get(otherUserId)
-    return record ? record.lastProcessedRoundId : null
-}

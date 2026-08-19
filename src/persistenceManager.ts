@@ -4,7 +4,7 @@ import { Storage } from '@dcl/sdk/server'
 import { persistenceRoom } from './persistenceMessages'
 import { getRoundState, startRoundStateSync, SharedPhase, RoundStateValue } from './networkRoundState'
 import { getAnswersForRound, AnswerOption } from './networkPlayerAnswer'
-import { hydrateConnections, getLastProcessedRoundId } from './connectionsManager'
+import { hydrateConnections } from './connectionsManager'
 import { acknowledgeLevelWithoutCelebration } from './friendshipManager'
 import {
     PersistedSocialQuestProfileV1,
@@ -231,6 +231,34 @@ export function initPersistenceServer(): void {
 let requestedProfile = false
 let hasHydrated = false
 
+/** One round's outcome with one partner, observed locally while hydration was still pending - see tickPersistenceCapture(). Individual, not aggregated: two pending rounds with the same partner (one already server-persisted, one not) must be reconciled independently, not as a single "latest roundId" check - that would only correctly resolve the fully-confirmed or fully-unconfirmed cases, not a mix of both. */
+interface PendingLocalEvent {
+    otherUserId: string
+    roundId: number
+    same: boolean
+}
+/** Bounded in practice: only accumulates during the narrow pre-hydration window (LOAD is a single fast round-trip, most sessions never add anything here at all), and is fully drained/discarded the moment profileResponse arrives - never grows for the rest of the session. */
+const pendingLocalEvents: PendingLocalEvent[] = []
+/** Guards captureRoundEvents() so a roundId is only ever pushed into pendingLocalEvents once, however many times (periodic tick, one-time hydration flush) it's called for. */
+const capturedRoundIds = new Set<number>()
+let lastTrackedRoundId: number | null = null
+
+/** Captures `roundId`'s valid pairings into pendingLocalEvents - shared by the periodic per-tick transition capture and the one-time flush at hydration time, deduped per-roundId (capturedRoundIds) so calling it from both never double-adds the same round. */
+function captureRoundEvents(roundId: number): void {
+    if (capturedRoundIds.has(roundId)) return
+    capturedRoundIds.add(roundId)
+
+    const answers = getAnswersForRound(roundId)
+    const myAnswer = answers.find((answer) => answer.userId === myProfile.userId && answer.option !== AnswerOption.NO_ANSWER)
+    if (!myAnswer) return // didn't answer that round - nothing to capture
+
+    for (const other of answers) {
+        if (other.userId === myProfile.userId) continue
+        if (other.option === AnswerOption.NO_ANSWER) continue
+        pendingLocalEvents.push({ otherUserId: other.userId, roundId, same: myAnswer.option === other.option })
+    }
+}
+
 /** Product decision (carried over from the persistence research phase): only players with a stable, persistent identity participate. Guests stay fully session-only, exactly like today - never blocked from playing. */
 function isPersistenceEligible(): boolean {
     const player = getPlayer()
@@ -245,41 +273,70 @@ export function initPersistenceClient(): void {
         if (!data.found) return
         hasHydrated = true
         try {
+            // Flush: capture whatever round is currently the most recent one,
+            // even if no LATER round has started yet to trigger the periodic
+            // per-tick capture below. Without this, a round that finished
+            // locally (already live in connectionsManager) right before this
+            // response arrived - but before the NEXT round began - would never
+            // make it into pendingLocalEvents at all. Capturing both
+            // lastTrackedRoundId and a fresh getRoundState().roundId covers the
+            // tick-vs-message-callback interleaving too; captureRoundEvents'
+            // own per-roundId dedup means calling it twice here (or having the
+            // periodic tick also call it later, if this ever ran before
+            // hasHydrated was checked) can never double-add the same round.
+            if (lastTrackedRoundId !== null) captureRoundEvents(lastTrackedRoundId)
+            captureRoundEvents(getRoundState().roundId)
+
             const profile = sanitizeProfile(JSON.parse(data.dataJson))
             const myAddress = normalizeUserId(myProfile.userId)
 
             // Hydration race: LOAD is async and gameplay is never blocked on it,
-            // so a round can genuinely complete locally with a partner BEFORE
-            // this response arrives. Meanwhile the server's OWN independent
-            // round-detection (scanCurrentRoundForValidPairs above) may have
-            // ALREADY persisted that very round before answering this
-            // requestProfile - in which case `profile` already includes it, and
-            // hydrateConnections()'s default add-on-merge would double-count it.
-            //
-            // Resolved by reconstructing, client-side, the exact eventId the
-            // server would have used for this session's most recently recorded
-            // local round with each partner (same SERVER_SESSION_ID, now known
-            // via data.serverSessionId, same sortedPairKey), and checking it
-            // against the persisted snapshot's own event log. If present, the
-            // snapshot already reflects this session's local progress with that
-            // partner - replace instead of add. If absent, the server hasn't
-            // caught up yet - add, exactly as before.
-            const replaceInstead = new Set<string>()
-            for (const otherUserId of Object.keys(profile.connections)) {
-                const localRoundId = getLastProcessedRoundId(otherUserId)
-                if (localRoundId === null) continue // no local entry for this partner - nothing to reconcile, plain fresh hydration
-                const eventId = `${data.serverSessionId}:${localRoundId}:${sortedPairKey(myAddress, otherUserId)}`
-                if (hasProcessedEventId(profile, eventId)) {
-                    replaceInstead.add(otherUserId)
-                }
-            }
+            // so one or more rounds can genuinely complete locally with a
+            // partner BEFORE this response arrives, while the server's OWN
+            // independent round-detection (scanCurrentRoundForValidPairs above)
+            // may have ALREADY persisted SOME of those same rounds (not
+            // necessarily all - a later one can still be unconfirmed while an
+            // earlier one already landed). Each pending event is reconstructed
+            // and checked against the snapshot's own event log individually:
+            // already-reflected events are dropped, genuinely-new ones are
+            // applied - once, each - on top of the persisted baseline.
+            const unconfirmedDeltas = new Map<string, { roundsTogether: number; sameAnswers: number; differentAnswers: number }>()
+            for (const event of pendingLocalEvents) {
+                const eventId = `${data.serverSessionId}:${event.roundId}:${sortedPairKey(myAddress, normalizeUserId(event.otherUserId))}`
+                if (hasProcessedEventId(profile, eventId)) continue // already reflected in the snapshot we just received
 
-            const records = Object.entries(profile.connections).map(([otherUserId, record]) => ({
-                otherUserId,
-                roundsTogether: record.roundsTogether,
-                sameAnswers: record.sameAnswers,
-                differentAnswers: record.differentAnswers
-            }))
+                const delta = unconfirmedDeltas.get(event.otherUserId) ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
+                delta.roundsTogether += 1
+                if (event.same) {
+                    delta.sameAnswers += 1
+                } else {
+                    delta.differentAnswers += 1
+                }
+                unconfirmedDeltas.set(event.otherUserId, delta)
+            }
+            pendingLocalEvents.length = 0 // one-time reconciliation - discard regardless of outcome, never used again this session
+
+            // Persisted baseline + only the unconfirmed remainder (possibly
+            // zero) for each partner the snapshot already knows about. This is
+            // already the fully-correct final total, so hydrateConnections is
+            // told to REPLACE rather than add for every one of these - the
+            // addition has already happened, once, right here.
+            const records = Object.entries(profile.connections).map(([otherUserId, record]) => {
+                const unconfirmed = unconfirmedDeltas.get(otherUserId)
+                unconfirmedDeltas.delete(otherUserId)
+                return {
+                    otherUserId,
+                    roundsTogether: record.roundsTogether + (unconfirmed?.roundsTogether ?? 0),
+                    sameAnswers: record.sameAnswers + (unconfirmed?.sameAnswers ?? 0),
+                    differentAnswers: record.differentAnswers + (unconfirmed?.differentAnswers ?? 0)
+                }
+            })
+            // Any remaining unconfirmedDeltas belong to partners with pending
+            // local events but no persisted history at all yet - nothing to
+            // reconcile; the live local connections entry already correctly
+            // reflects them, untouched, since it was never a `records` target.
+            const replaceInstead = new Set(records.map((record) => record.otherUserId))
+
             const results = hydrateConnections(records, replaceInstead)
             for (const result of results) {
                 // Only the merge case needs reconciling - see hydrateConnections()'s
@@ -288,7 +345,7 @@ export function initPersistenceClient(): void {
                     acknowledgeLevelWithoutCelebration(result.otherUserId, result.roundsTogether)
                 }
             }
-            console.log(`[Persistence][CLIENT] Loaded ${records.length} persisted connection(s), ${replaceInstead.size} reconciled against local progress`)
+            console.log(`[Persistence][CLIENT] Loaded ${records.length} persisted connection(s)`)
         } catch (err) {
             console.error(`[Persistence][CLIENT] Failed to parse loaded profile - continuing session-only: ${err instanceof Error ? err.message : String(err)}`)
         }
@@ -301,14 +358,38 @@ export function initPersistenceClient(): void {
  * moment identity is available and the player isn't a guest - deliberately not
  * gated on having pressed JOIN, so hydration is requested well before the first
  * round could complete (though see profileResponse's hydration-race handling
- * above for what happens if a round finishes locally before the response
- * arrives anyway). Never blocks or gates anything: if this never fires
- * (identity never resolves, message never arrives), the game simply continues
- * session-only, exactly like it does today.
+ * above for what happens if one or more rounds finish locally before the
+ * response arrives anyway). Never blocks or gates anything: if this never
+ * fires (identity never resolves, message never arrives), the game simply
+ * continues session-only, exactly like it does today.
  */
 export function tickPersistenceLoad(): void {
     if (requestedProfile) return
     if (!isPersistenceEligible()) return
     requestedProfile = true
     persistenceRoom.send('requestProfile', {})
+}
+
+/**
+ * Called once per tick from roundManager.tick(), only while hydration is still
+ * pending (a no-op forever after, including for the rest of a session that
+ * never even needed this). Independently observes the SAME synced
+ * RoundState/PlayerAnswer this client's own connectionsManager.processRoundState()
+ * already reads, purely to capture individual pre-hydration round outcomes
+ * for the reconciliation above - never writes to connections, never triggers
+ * a celebration, never duplicates connectionsManager's own bookkeeping
+ * (lastProcessedRoundId, newConnectionsThisRound, etc.). connectionsManager's
+ * own tick, wired separately in roundManager.tick(), is what actually drives
+ * gameplay-visible Connections/Friendship - this is a read-only side observer
+ * of the exact same source data, solely for this file's own reconciliation.
+ */
+export function tickPersistenceCapture(state: RoundStateValue): void {
+    if (hasHydrated) return
+    if (state.roundId === lastTrackedRoundId) return
+
+    const previousRoundId = lastTrackedRoundId
+    lastTrackedRoundId = state.roundId
+    if (previousRoundId === null) return // first observation this session - nothing finished yet to capture
+
+    captureRoundEvents(previousRoundId)
 }
