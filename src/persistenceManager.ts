@@ -7,6 +7,7 @@ import { getAnswersForRound, AnswerOption } from './networkPlayerAnswer'
 import { hydrateConnections } from './connectionsManager'
 import { acknowledgeLevelWithoutCelebration } from './friendshipManager'
 import {
+    PersistedConnectionRecord,
     PersistedSocialQuestProfileV1,
     STORAGE_KEY,
     emptyProfile,
@@ -53,13 +54,15 @@ const SERVER_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(3
 
 /**
  * In-memory authoritative copy per player, for the lifetime of this server
- * process. This - not Storage.player itself - is what prevents a read-modify-write
- * race between two events for the same player: each event mutates this
- * in-memory object synchronously (JS has no thread interleaving) before the
- * resulting write is queued, so two overlapping saves can never each compute
- * their delta from the same stale snapshot. Storage.player.set() additionally
- * serializes and coalesces concurrent writes to the same key on its own, so the
- * two layers together fully rule out an old write clobbering a newer one.
+ * process - the single source of truth applyDeltaToPlayer() reads its "current
+ * state" from. Only ever updated by a successful, queued Storage.player.set()
+ * commit (see applyDeltaToPlayer) - never mutated optimistically before Storage
+ * confirms success, and never touched at all on failure. Combined with the
+ * global write queue (every read-modify-write transaction for every player runs
+ * inside the same FIFO), this guarantees a second delta for the same player -
+ * another pair in the same RESULT scan, or a retry of this same pair on a later
+ * tick - always builds on top of the last *confirmed* state, never a stale or
+ * optimistic snapshot.
  */
 const serverProfiles = new Map<string, PersistedSocialQuestProfileV1>()
 /** Addresses currently mid-load, so a second caller arriving before the first Storage.player.get() resolves doesn't race it - both await the same promise. */
@@ -143,37 +146,75 @@ function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
     return runTask
 }
 
-/** Applies one round's delta to a single player's own profile against `otherUserId`, durably deduped via that player's own persisted recentProcessedEventIds - independent of the in-memory fast path, so this stays correct even across a server restart. */
-async function applyDeltaToPlayer(address: string, otherUserId: string, same: boolean, eventId: string): Promise<void> {
-    const profile = await loadProfile(address)
-    if (hasProcessedEventId(profile, eventId)) return // already applied - durable, cross-restart dedup
+/** Outcome of one applyDeltaToPlayer() attempt - lets the caller (processRoundPair) tell a durable no-op apart from a fresh commit or a failure that should be retried on a later RESULT tick. */
+type ApplyDeltaResult = 'SAVED' | 'ALREADY_PROCESSED' | 'FAILED'
 
-    // Mutated synchronously, immediately - before this event's write is even
-    // queued - so a second event for the same player (another pair, or a
-    // later RESULT tick) always builds on top of this one's result rather
-    // than a stale snapshot, regardless of how long this event's turn in the
-    // write queue below ends up taking.
-    const record = profile.connections[otherUserId] ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
-    record.roundsTogether += 1
-    if (same) {
-        record.sameAnswers += 1
-    } else {
-        record.differentAnswers += 1
-    }
-    profile.connections[otherUserId] = record
-    pushProcessedEventId(profile, eventId)
+/**
+ * Applies one round's delta to a single player's own profile against `otherUserId`,
+ * as a queued read-current -> build candidate -> commit-only-on-success transaction.
+ * The canonical in-memory profile (serverProfiles) is never mutated optimistically -
+ * only after Storage.player.set has actually confirmed success. On failure, nothing
+ * about this player's state changes at all: not the counters, not
+ * recentProcessedEventIds - so a later RESULT tick's rescan is free to retry this
+ * exact eventId from scratch, with no separate retry system needed.
+ *
+ * The entire read-modify-write happens INSIDE the global write queue (enqueueWrite),
+ * not just the final Storage.player.set call. This is what keeps multiple deltas for
+ * the SAME player (e.g. A-B and A-C detected in the same RESULT scan, or this pair
+ * rescanned on a later tick) from ever racing: each queued task re-reads
+ * serverProfiles.get(address) at the moment it actually runs - its turn in the queue -
+ * which by then already reflects every earlier-queued write for that player that has
+ * committed, never a stale snapshot captured before this task was even enqueued.
+ */
+async function applyDeltaToPlayer(address: string, otherUserId: string, same: boolean, eventId: string): Promise<ApplyDeltaResult> {
+    const baseline = await loadProfile(address)
+    if (hasProcessedEventId(baseline, eventId)) return 'ALREADY_PROCESSED' // fast path - never even joins the queue
 
-    await enqueueWrite(async () => {
+    return enqueueWrite(async (): Promise<ApplyDeltaResult> => {
+        // Re-check against the CURRENT canonical profile, not `baseline` - it may have
+        // advanced while this task was waiting its turn (another queued write for this
+        // same player already committed).
+        const current = serverProfiles.get(address) ?? baseline
+        if (hasProcessedEventId(current, eventId)) return 'ALREADY_PROCESSED'
+
+        const existing = current.connections[otherUserId] ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
+        const record: PersistedConnectionRecord = {
+            roundsTogether: existing.roundsTogether + 1,
+            sameAnswers: existing.sameAnswers + (same ? 1 : 0),
+            differentAnswers: existing.differentAnswers + (same ? 0 : 1)
+        }
+        // A fresh object tree - current/serverProfiles is never touched unless this commits below.
+        const candidate: PersistedSocialQuestProfileV1 = {
+            version: current.version,
+            connections: { ...current.connections, [otherUserId]: record },
+            recentProcessedEventIds: [...current.recentProcessedEventIds]
+        }
+        pushProcessedEventId(candidate, eventId)
+
         // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified. Logged
         // here (inside the queued task, not before enqueueing) so "starting"
         // always reflects this write's actual turn, not just when it joined the queue.
         console.log(`[Persistence][SERVER][TEST] Storage.player.set starting for ${address} (roundsTogether now ${record.roundsTogether})`)
-        const ok = await saveProfile(address, profile)
+        const ok = await saveProfile(address, candidate)
         console.log(`[Persistence][SERVER][TEST] Storage.player.set result for ${address}: ${ok ? 'OK' : 'FAILED'}`)
+
+        if (!ok) return 'FAILED'
+
+        serverProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+        return 'SAVED'
     })
 }
 
-/** Persists one validated pair's outcome for BOTH players symmetrically - each player's own profile gets a delta against the other, under the exact same eventId, so the pair as a whole is one atomic unit of dedup even though it lives in two separate Storage.player records. */
+/**
+ * Persists one validated pair's outcome for BOTH players symmetrically - each player's
+ * own profile gets a delta against the other, under the exact same eventId. The pair is
+ * only added to processedPairEventsInMemory (and so stops being rescanned) once BOTH
+ * sides have durably landed (SAVED or ALREADY_PROCESSED) - if one side saved and the
+ * other failed, the pair is rescanned again on the next RESULT tick: the succeeded side
+ * takes its ALREADY_PROCESSED fast path (a no-op, never double-applies), while the
+ * failed side gets a fresh attempt, exactly the natural retry the RESULT scanner
+ * already provides every ~1s, with no new retry infrastructure.
+ */
 async function processRoundPair(roundId: number, userA: string, userB: string, same: boolean): Promise<void> {
     const eventId = `${SERVER_SESSION_ID}:${roundId}:${sortedPairKey(userA, userB)}`
     // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified.
@@ -182,10 +223,20 @@ async function processRoundPair(roundId: number, userA: string, userB: string, s
         console.log(`[Persistence][SERVER][TEST] Pair already processed this server session - skipping (dedup)`)
         return
     }
-    processedPairEventsInMemory.add(eventId)
 
     try {
-        await Promise.all([applyDeltaToPlayer(userA, userB, same, eventId), applyDeltaToPlayer(userB, userA, same, eventId)])
+        const [resultA, resultB] = await Promise.all([
+            applyDeltaToPlayer(userA, userB, same, eventId),
+            applyDeltaToPlayer(userB, userA, same, eventId)
+        ])
+        const doneA = resultA === 'SAVED' || resultA === 'ALREADY_PROCESSED'
+        const doneB = resultB === 'SAVED' || resultB === 'ALREADY_PROCESSED'
+        if (doneA && doneB) {
+            processedPairEventsInMemory.add(eventId)
+        } else {
+            // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified.
+            console.log(`[Persistence][SERVER][TEST] Pair not fully processed yet (A=${resultA}, B=${resultB}) - will retry on a later RESULT tick`)
+        }
     } catch (err) {
         console.error(`[Persistence][SERVER] Failed to process round ${roundId} pair: ${err instanceof Error ? err.message : String(err)}`)
     }
