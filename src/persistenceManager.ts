@@ -191,13 +191,9 @@ async function applyDeltaToPlayer(address: string, otherUserId: string, same: bo
         }
         pushProcessedEventId(candidate, eventId)
 
-        // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified. Logged
-        // here (inside the queued task, not before enqueueing) so "starting"
-        // always reflects this write's actual turn, not just when it joined the queue.
-        console.log(`[Persistence][SERVER][TEST] Storage.player.set starting for ${address} (roundsTogether now ${record.roundsTogether})`)
+        // saveProfile() already logs a clear error on failure (returned false or threw) -
+        // nothing further to log here on the failure path.
         const ok = await saveProfile(address, candidate)
-        console.log(`[Persistence][SERVER][TEST] Storage.player.set result for ${address}: ${ok ? 'OK' : 'FAILED'}`)
-
         if (!ok) return 'FAILED'
 
         serverProfiles.set(address, candidate) // commit - only now does this become the canonical profile
@@ -217,12 +213,7 @@ async function applyDeltaToPlayer(address: string, otherUserId: string, same: bo
  */
 async function processRoundPair(roundId: number, userA: string, userB: string, same: boolean): Promise<void> {
     const eventId = `${SERVER_SESSION_ID}:${roundId}:${sortedPairKey(userA, userB)}`
-    // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified.
-    console.log(`[Persistence][SERVER][TEST] Pair detected: ${userA} <-> ${userB} same=${same} eventId=${eventId}`)
-    if (processedPairEventsInMemory.has(eventId)) {
-        console.log(`[Persistence][SERVER][TEST] Pair already processed this server session - skipping (dedup)`)
-        return
-    }
+    if (processedPairEventsInMemory.has(eventId)) return
 
     try {
         const [resultA, resultB] = await Promise.all([
@@ -234,8 +225,9 @@ async function processRoundPair(roundId: number, userA: string, userB: string, s
         if (doneA && doneB) {
             processedPairEventsInMemory.add(eventId)
         } else {
-            // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified.
-            console.log(`[Persistence][SERVER][TEST] Pair not fully processed yet (A=${resultA}, B=${resultB}) - will retry on a later RESULT tick`)
+            console.error(
+                `[Persistence][SERVER] Pair ${userA} <-> ${userB} (round ${roundId}) not fully persisted yet (A=${resultA}, B=${resultB}) - will retry on a later RESULT tick`
+            )
         }
     } catch (err) {
         console.error(`[Persistence][SERVER] Failed to process round ${roundId} pair: ${err instanceof Error ? err.message : String(err)}`)
@@ -272,19 +264,10 @@ async function processRoundPair(roundId: number, userA: string, userB: string, s
  * which is also why the "last round before leaving" problem doesn't apply
  * here: persistence happens live, during RESULT, not after the next round starts.
  */
-let lastLoggedResultRoundId: number | null = null
-
 function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
     if (state.phase !== SharedPhase.RESULT) return
 
     const answers = getAnswersForRound(state.roundId).filter((answer) => answer.option !== AnswerOption.NO_ANSWER)
-
-    // TEMP DEBUG - Manual Test 1 (happy path). Remove once verified. Logged
-    // once per roundId (not every tick) to avoid spamming while RESULT re-scans.
-    if (lastLoggedResultRoundId !== state.roundId) {
-        lastLoggedResultRoundId = state.roundId
-        console.log(`[Persistence][SERVER][TEST] RESULT detected for round ${state.roundId} - ${answers.length} valid answer(s) so far`)
-    }
 
     for (let i = 0; i < answers.length; i++) {
         for (let j = i + 1; j < answers.length; j++) {

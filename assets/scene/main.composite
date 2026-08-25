@@ -58,23 +58,107 @@
         "serializationType": "transform"
       },
       "data": {
-        "512": {
+        "514": {
           "json": {
             "position": {
-              "x": 14.5,
-              "y": 0,
-              "z": 14.5
-            },
-            "rotation": {
-              "x": 0,
-              "y": 0,
-              "z": 0,
-              "w": 1
+              "x": 10.7500581741333,
+              "y": 0.48601338267326355,
+              "z": 12.260000228881836
             },
             "scale": {
               "x": 1,
               "y": 1,
               "z": 1
+            },
+            "rotation": {
+              "x": -0.5,
+              "y": 0.5,
+              "z": 0.5,
+              "w": 0.5
+            },
+            "parent": 0
+          }
+        },
+        "515": {
+          "json": {
+            "position": {
+              "x": 11.640000343322754,
+              "y": 8.180000305175781,
+              "z": 16.06999969482422
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 3.109999895095825
+            },
+            "rotation": {
+              "x": 0.7071067690849304,
+              "y": 0,
+              "z": 0,
+              "w": 0.7071067690849304
+            },
+            "parent": 0
+          }
+        },
+        "517": {
+          "json": {
+            "position": {
+              "x": 19.730466842651367,
+              "y": 8.180000305175781,
+              "z": 16.070703506469727
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 3.109999895095825
+            },
+            "rotation": {
+              "x": 0.7071067690849304,
+              "y": 0,
+              "z": 0,
+              "w": 0.7071067690849304
+            },
+            "parent": 0
+          }
+        },
+        "131588": {
+          "json": {
+            "position": {
+              "x": 10.75,
+              "y": 1.7599999904632568,
+              "z": 12.260000228881836
+            },
+            "scale": {
+              "x": 0.8899999856948853,
+              "y": 0.8799999952316284,
+              "z": 0.5600000023841858
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0.9608345031738281,
+              "z": 0,
+              "w": 0.27712273597717285
+            },
+            "parent": 0
+          }
+        },
+        "852480": {
+          "json": {
+            "position": {
+              "x": 16.325326919555664,
+              "y": 0,
+              "z": 14.507364273071289
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "rotation": {
+              "x": 0,
+              "y": 1,
+              "z": 0,
+              "w": 0
             },
             "parent": 0
           }
@@ -90,9 +174,9 @@
         "protocolBuffer": "PBGltfContainer"
       },
       "data": {
-        "512": {
+        "852480": {
           "json": {
-            "src": "assets/asset-packs/cross_red/cross_red.glb",
+            "src": "assets/Models/social_quest/social_quest.glb",
             "visibleMeshesCollisionMask": 0,
             "invisibleMeshesCollisionMask": 3
           }
@@ -112,9 +196,29 @@
         "serializationType": "map"
       },
       "data": {
-        "512": {
+        "514": {
           "json": {
-            "value": "Cross red"
+            "value": "Spotlight"
+          }
+        },
+        "515": {
+          "json": {
+            "value": "Spotlight_2"
+          }
+        },
+        "517": {
+          "json": {
+            "value": "Spotlight_4"
+          }
+        },
+        "131588": {
+          "json": {
+            "value": "Spotlight_5"
+          }
+        },
+        "852480": {
+          "json": {
+            "value": "social_quest.glb"
           }
         }
       }
@@ -149,6 +253,91 @@
       }
     },
     {
+      "name": "core::LightSource",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBLightSource"
+      },
+      "data": {
+        "514": {
+          "json": {
+            "active": true,
+            "color": {
+              "r": 0.9529411792755127,
+              "g": 0.8235294222831726,
+              "b": 0.7686274647712708
+            },
+            "intensity": 4054,
+            "range": 50,
+            "shadow": true,
+            "type": {
+              "$case": "point",
+              "point": {}
+            }
+          }
+        },
+        "515": {
+          "json": {
+            "active": true,
+            "color": {
+              "r": 1,
+              "g": 0.8588235378265381,
+              "b": 0.8588235378265381
+            },
+            "intensity": 128264,
+            "range": 500,
+            "shadow": false,
+            "type": {
+              "$case": "spot",
+              "spot": {
+                "innerAngle": 30,
+                "outerAngle": 64
+              }
+            }
+          }
+        },
+        "517": {
+          "json": {
+            "active": true,
+            "color": {
+              "r": 1,
+              "g": 0.8588235378265381,
+              "b": 0.8588235378265381
+            },
+            "intensity": 128264,
+            "range": 500,
+            "shadow": false,
+            "type": {
+              "$case": "spot",
+              "spot": {
+                "innerAngle": 30,
+                "outerAngle": 64
+              }
+            }
+          }
+        },
+        "131588": {
+          "json": {
+            "active": true,
+            "color": {
+              "r": 0.9529411792755127,
+              "g": 0.686274528503418,
+              "b": 0.8039215803146362
+            },
+            "intensity": 4054,
+            "range": 2,
+            "shadow": true,
+            "type": {
+              "$case": "point",
+              "point": {}
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "inspector::Selection",
       "jsonSchema": {
         "type": "object",
@@ -161,7 +350,7 @@
         "serializationType": "map"
       },
       "data": {
-        "512": {
+        "0": {
           "json": {
             "gizmo": 0
           }
@@ -214,7 +403,11 @@
                 "entity": 0,
                 "open": true,
                 "children": [
-                  512
+                  852480,
+                  514,
+                  131588,
+                  515,
+                  517
                 ]
               },
               {
@@ -226,10 +419,859 @@
                 "children": []
               },
               {
-                "entity": 512,
+                "entity": 852480,
+                "children": []
+              },
+              {
+                "entity": 514,
+                "children": []
+              },
+              {
+                "entity": 515,
+                "children": []
+              },
+              {
+                "entity": 517,
+                "children": []
+              },
+              {
+                "entity": 131588,
                 "children": []
               }
             ]
+          }
+        }
+      }
+    },
+    {
+      "name": "inspector::TransformConfig",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "porportionalScaling": {
+            "type": "boolean",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "boolean",
+              "serializationType": "boolean"
+            }
+          }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "514": {
+          "json": {}
+        },
+        "515": {
+          "json": {}
+        },
+        "517": {
+          "json": {}
+        },
+        "131588": {
+          "json": {}
+        },
+        "852480": {
+          "json": {}
+        }
+      }
+    },
+    {
+      "name": "inspector::Config",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "isBasicViewEnabled": {
+            "type": "boolean",
+            "serializationType": "boolean"
+          },
+          "componentName": {
+            "type": "string",
+            "serializationType": "utf8-string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "type": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "layout": {
+                  "type": "string",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "string",
+                    "serializationType": "utf8-string"
+                  }
+                },
+                "basicViewId": {
+                  "type": "string",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "string",
+                    "serializationType": "utf8-string"
+                  }
+                }
+              },
+              "serializationType": "map"
+            },
+            "serializationType": "array"
+          },
+          "assetId": {
+            "type": "string",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "string",
+              "serializationType": "utf8-string"
+            }
+          },
+          "label": {
+            "type": "string",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "string",
+              "serializationType": "utf8-string"
+            }
+          },
+          "sections": {
+            "type": "array",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "serializationType": "utf8-string"
+                  },
+                  "label": {
+                    "type": "string",
+                    "serializationType": "optional",
+                    "optionalJsonSchema": {
+                      "type": "string",
+                      "serializationType": "utf8-string"
+                    }
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "component": {
+                          "type": "string",
+                          "serializationType": "utf8-string"
+                        },
+                        "widget": {
+                          "type": "string",
+                          "serializationType": "utf8-string"
+                        },
+                        "label": {
+                          "type": "string",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "string",
+                            "serializationType": "utf8-string"
+                          }
+                        },
+                        "type": {
+                          "type": "string",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "string",
+                            "serializationType": "utf8-string"
+                          }
+                        },
+                        "path": {
+                          "type": "string",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "string",
+                            "serializationType": "utf8-string"
+                          }
+                        },
+                        "basicViewId": {
+                          "type": "string",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "string",
+                            "serializationType": "utf8-string"
+                          }
+                        },
+                        "props": {
+                          "type": "object",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "object",
+                            "properties": {
+                              "basic": {
+                                "type": "boolean",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "boolean",
+                                  "serializationType": "boolean"
+                                }
+                              }
+                            },
+                            "serializationType": "map"
+                          }
+                        },
+                        "constraints": {
+                          "type": "object",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "object",
+                            "properties": {
+                              "min": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "max": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "minExclusive": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "maxExclusive": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "step": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "multipleOf": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "minLength": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "maxLength": {
+                                "type": "number",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "number",
+                                  "serializationType": "float32"
+                                }
+                              },
+                              "pattern": {
+                                "type": "string",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "string",
+                                  "serializationType": "utf8-string"
+                                }
+                              },
+                              "format": {
+                                "type": "string",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "string",
+                                  "serializationType": "utf8-string"
+                                }
+                              },
+                              "default": {
+                                "type": "string",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "string",
+                                  "serializationType": "utf8-string"
+                                }
+                              }
+                            },
+                            "serializationType": "map"
+                          }
+                        },
+                        "transform": {
+                          "type": "object",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "object",
+                            "properties": {
+                              "in": {
+                                "type": "object",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "object",
+                                  "properties": {
+                                    "steps": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "op": {
+                                            "type": "string",
+                                            "serializationType": "utf8-string"
+                                          },
+                                          "onError": {
+                                            "type": "string",
+                                            "serializationType": "optional",
+                                            "optionalJsonSchema": {
+                                              "type": "string",
+                                              "enum": [
+                                                "fail",
+                                                "skip",
+                                                "noop"
+                                              ],
+                                              "default": "noop",
+                                              "serializationType": "enum-string",
+                                              "enumObject": {
+                                                "FAIL": "fail",
+                                                "SKIP": "skip",
+                                                "NOOP": "noop"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "serializationType": "map"
+                                      },
+                                      "serializationType": "array"
+                                    }
+                                  },
+                                  "serializationType": "map"
+                                }
+                              },
+                              "out": {
+                                "type": "object",
+                                "serializationType": "optional",
+                                "optionalJsonSchema": {
+                                  "type": "object",
+                                  "properties": {
+                                    "steps": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "op": {
+                                            "type": "string",
+                                            "serializationType": "utf8-string"
+                                          },
+                                          "onError": {
+                                            "type": "string",
+                                            "serializationType": "optional",
+                                            "optionalJsonSchema": {
+                                              "type": "string",
+                                              "enum": [
+                                                "fail",
+                                                "skip",
+                                                "noop"
+                                              ],
+                                              "default": "noop",
+                                              "serializationType": "enum-string",
+                                              "enumObject": {
+                                                "FAIL": "fail",
+                                                "SKIP": "skip",
+                                                "NOOP": "noop"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "serializationType": "map"
+                                      },
+                                      "serializationType": "array"
+                                    }
+                                  },
+                                  "serializationType": "map"
+                                }
+                              }
+                            },
+                            "serializationType": "map"
+                          }
+                        },
+                        "dataSource": {
+                          "type": "object",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "serializationType": "utf8-string"
+                              }
+                            },
+                            "serializationType": "map"
+                          }
+                        }
+                      },
+                      "serializationType": "map"
+                    },
+                    "serializationType": "array"
+                  },
+                  "columns": {
+                    "type": "number",
+                    "serializationType": "optional",
+                    "optionalJsonSchema": {
+                      "type": "number",
+                      "serializationType": "float32"
+                    }
+                  },
+                  "helpTooltip": {
+                    "type": "object",
+                    "serializationType": "optional",
+                    "optionalJsonSchema": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "serializationType": "utf8-string"
+                        },
+                        "link": {
+                          "type": "string",
+                          "serializationType": "optional",
+                          "optionalJsonSchema": {
+                            "type": "string",
+                            "serializationType": "utf8-string"
+                          }
+                        }
+                      },
+                      "serializationType": "map"
+                    }
+                  }
+                },
+                "serializationType": "map"
+              },
+              "serializationType": "array"
+            }
+          },
+          "helpTooltip": {
+            "type": "object",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "link": {
+                  "type": "string",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "string",
+                    "serializationType": "utf8-string"
+                  }
+                }
+              },
+              "serializationType": "map"
+            }
+          },
+          "version": {
+            "type": "number",
+            "serializationType": "optional",
+            "optionalJsonSchema": {
+              "type": "number",
+              "serializationType": "float32"
+            }
+          }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "514": {
+          "json": {
+            "isBasicViewEnabled": true,
+            "componentName": "",
+            "fields": [],
+            "assetId": "87c829b3-8e8d-4fcb-9f43-85d3aa9084f6",
+            "label": "Light Settings",
+            "sections": [
+              {
+                "id": "light-settings",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "ColorField",
+                    "label": "Color",
+                    "type": "Color3",
+                    "path": "color",
+                    "props": {
+                      "basic": true
+                    },
+                    "transform": {
+                      "in": {
+                        "steps": [
+                          {
+                            "op": "toHex"
+                          }
+                        ]
+                      },
+                      "out": {
+                        "steps": [
+                          {
+                            "op": "toColor3"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Intensity",
+                    "path": "intensity",
+                    "constraints": {
+                      "max": 300000,
+                      "step": 1,
+                      "default": "16000"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Inner Angle",
+                    "path": "type.spot.innerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "30"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Outer Angle",
+                    "path": "type.spot.outerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "40"
+                    }
+                  }
+                ],
+                "columns": 1
+              },
+              {
+                "id": "shadow-mask",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "FileUploadField",
+                    "label": "Shadow Mask Texture",
+                    "path": "shadowMaskTexture.tex.texture.src",
+                    "props": {}
+                  }
+                ]
+              }
+            ],
+            "helpTooltip": {
+              "text": "A spotlight that can be used to illuminate a scene."
+            },
+            "version": 2
+          }
+        },
+        "515": {
+          "json": {
+            "isBasicViewEnabled": true,
+            "componentName": "",
+            "fields": [],
+            "assetId": "87c829b3-8e8d-4fcb-9f43-85d3aa9084f6",
+            "label": "Light Settings",
+            "sections": [
+              {
+                "id": "light-settings",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "ColorField",
+                    "label": "Color",
+                    "type": "Color3",
+                    "path": "color",
+                    "props": {
+                      "basic": true
+                    },
+                    "transform": {
+                      "in": {
+                        "steps": [
+                          {
+                            "op": "toHex"
+                          }
+                        ]
+                      },
+                      "out": {
+                        "steps": [
+                          {
+                            "op": "toColor3"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Intensity",
+                    "path": "intensity",
+                    "constraints": {
+                      "max": 300000,
+                      "step": 1,
+                      "default": "16000"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Inner Angle",
+                    "path": "type.spot.innerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "30"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Outer Angle",
+                    "path": "type.spot.outerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "40"
+                    }
+                  }
+                ],
+                "columns": 1
+              },
+              {
+                "id": "shadow-mask",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "FileUploadField",
+                    "label": "Shadow Mask Texture",
+                    "path": "shadowMaskTexture.tex.texture.src",
+                    "props": {}
+                  }
+                ]
+              }
+            ],
+            "helpTooltip": {
+              "text": "A spotlight that can be used to illuminate a scene."
+            },
+            "version": 2
+          }
+        },
+        "517": {
+          "json": {
+            "isBasicViewEnabled": true,
+            "componentName": "",
+            "fields": [],
+            "assetId": "87c829b3-8e8d-4fcb-9f43-85d3aa9084f6",
+            "label": "Light Settings",
+            "sections": [
+              {
+                "id": "light-settings",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "ColorField",
+                    "label": "Color",
+                    "type": "Color3",
+                    "path": "color",
+                    "props": {
+                      "basic": true
+                    },
+                    "transform": {
+                      "in": {
+                        "steps": [
+                          {
+                            "op": "toHex"
+                          }
+                        ]
+                      },
+                      "out": {
+                        "steps": [
+                          {
+                            "op": "toColor3"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Intensity",
+                    "path": "intensity",
+                    "constraints": {
+                      "max": 300000,
+                      "step": 1,
+                      "default": "16000"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Inner Angle",
+                    "path": "type.spot.innerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "30"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Outer Angle",
+                    "path": "type.spot.outerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "40"
+                    }
+                  }
+                ],
+                "columns": 1
+              },
+              {
+                "id": "shadow-mask",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "FileUploadField",
+                    "label": "Shadow Mask Texture",
+                    "path": "shadowMaskTexture.tex.texture.src",
+                    "props": {}
+                  }
+                ]
+              }
+            ],
+            "helpTooltip": {
+              "text": "A spotlight that can be used to illuminate a scene."
+            },
+            "version": 2
+          }
+        },
+        "131588": {
+          "json": {
+            "isBasicViewEnabled": true,
+            "componentName": "",
+            "fields": [],
+            "assetId": "87c829b3-8e8d-4fcb-9f43-85d3aa9084f6",
+            "label": "Light Settings",
+            "sections": [
+              {
+                "id": "light-settings",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "ColorField",
+                    "label": "Color",
+                    "type": "Color3",
+                    "path": "color",
+                    "props": {
+                      "basic": true
+                    },
+                    "transform": {
+                      "in": {
+                        "steps": [
+                          {
+                            "op": "toHex"
+                          }
+                        ]
+                      },
+                      "out": {
+                        "steps": [
+                          {
+                            "op": "toColor3"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Intensity",
+                    "path": "intensity",
+                    "constraints": {
+                      "max": 300000,
+                      "step": 1,
+                      "default": "16000"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Inner Angle",
+                    "path": "type.spot.innerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "30"
+                    }
+                  },
+                  {
+                    "component": "core::LightSource",
+                    "widget": "RangeField",
+                    "label": "Outer Angle",
+                    "path": "type.spot.outerAngle",
+                    "constraints": {
+                      "max": 180,
+                      "step": 1,
+                      "default": "40"
+                    }
+                  }
+                ],
+                "columns": 1
+              },
+              {
+                "id": "shadow-mask",
+                "items": [
+                  {
+                    "component": "core::LightSource",
+                    "widget": "FileUploadField",
+                    "label": "Shadow Mask Texture",
+                    "path": "shadowMaskTexture.tex.texture.src",
+                    "props": {}
+                  }
+                ]
+              }
+            ],
+            "helpTooltip": {
+              "text": "A spotlight that can be used to illuminate a scene."
+            },
+            "version": 2
           }
         }
       }
@@ -617,8 +1659,8 @@
                   "x": {
                     "$case": "range",
                     "value": [
-                      0,
-                      3
+                      13.210000038146973,
+                      16.209999084472656
                     ]
                   },
                   "y": {
@@ -631,15 +1673,15 @@
                   "z": {
                     "$case": "range",
                     "value": [
-                      0,
-                      3
+                      3.2300000190734863,
+                      6.230000019073486
                     ]
                   }
                 },
                 "cameraTarget": {
-                  "x": 8,
+                  "x": 14.65999984741211,
                   "y": 1,
-                  "z": 8
+                  "z": 5.550000190734863
                 }
               }
             ],
@@ -939,6 +1981,135 @@
       }
     },
     {
+      "name": "asset-packs::Actions",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "serializationType": "int32"
+          },
+          "value": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "type": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "jsonPayload": {
+                  "type": "string",
+                  "serializationType": "utf8-string"
+                },
+                "allowedInBasicView": {
+                  "type": "boolean",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "boolean",
+                    "serializationType": "boolean"
+                  }
+                },
+                "basicViewId": {
+                  "type": "string",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "string",
+                    "serializationType": "utf8-string"
+                  }
+                },
+                "default": {
+                  "type": "boolean",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": {
+                    "type": "boolean",
+                    "serializationType": "boolean"
+                  }
+                }
+              },
+              "serializationType": "map"
+            },
+            "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "514": {
+          "json": {
+            "id": 3,
+            "value": [
+              {
+                "name": "Turn On",
+                "type": "lights_on",
+                "jsonPayload": "{}"
+              },
+              {
+                "name": "Turn Off",
+                "type": "lights_off",
+                "jsonPayload": "{}"
+              }
+            ]
+          }
+        },
+        "515": {
+          "json": {
+            "id": 4,
+            "value": [
+              {
+                "name": "Turn On",
+                "type": "lights_on",
+                "jsonPayload": "{}"
+              },
+              {
+                "name": "Turn Off",
+                "type": "lights_off",
+                "jsonPayload": "{}"
+              }
+            ]
+          }
+        },
+        "517": {
+          "json": {
+            "id": 6,
+            "value": [
+              {
+                "name": "Turn On",
+                "type": "lights_on",
+                "jsonPayload": "{}"
+              },
+              {
+                "name": "Turn Off",
+                "type": "lights_off",
+                "jsonPayload": "{}"
+              }
+            ]
+          }
+        },
+        "131588": {
+          "json": {
+            "id": 8,
+            "value": [
+              {
+                "name": "Turn On",
+                "type": "lights_on",
+                "jsonPayload": "{}"
+              },
+              {
+                "name": "Turn Off",
+                "type": "lights_off",
+                "jsonPayload": "{}"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "name": "asset-packs::Counter",
       "jsonSchema": {
         "type": "object",
@@ -958,7 +2129,42 @@
         "0": {
           "json": {
             "id": 0,
-            "value": 0
+            "value": 8
+          }
+        }
+      }
+    },
+    {
+      "name": "asset-packs::Placeholder",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string",
+            "serializationType": "utf8-string"
+          }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "514": {
+          "json": {
+            "src": "assets/asset-packs/spotlight/spotlight.glb"
+          }
+        },
+        "515": {
+          "json": {
+            "src": "assets/asset-packs/spotlight/spotlight.glb"
+          }
+        },
+        "517": {
+          "json": {
+            "src": "assets/asset-packs/spotlight/spotlight.glb"
+          }
+        },
+        "131588": {
+          "json": {
+            "src": "assets/asset-packs/spotlight/spotlight.glb"
           }
         }
       }
