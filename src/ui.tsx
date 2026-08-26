@@ -62,6 +62,25 @@ const HUD_TOP_MARGIN = 10
 /** Extra vertical separation nudge between the CONNECTIONS pill above and the JOIN panel below it - JOIN only, per real-device feedback that they sat too close together. Every other phase's panel position is untouched. */
 const JOIN_EXTRA_TOP_MARGIN = 16
 
+/** Gap between the CONNECTIONS pill and the Agenda button - the two form one fixed HUD group (see uiMenu), always this same distance apart, never repositioned relative to each other between phases. */
+const SOCIAL_HUD_GROUP_GAP = 8
+
+/**
+ * The Agenda button's "notebook" look is built entirely from plain background
+ * rectangles (a spine strip + two ruled-line bars) rather than a text glyph or
+ * emoji - deliberately, since this codebase has no confirmed-reliable notebook/
+ * book glyph (only "✕" and "✦" have been validated in production so far - see
+ * the "+" ghost investigation for why an unverified glyph's mobile font
+ * fallback isn't something to risk on a new icon). Plain colored rectangles
+ * with borderRadius/borderColor are already a proven pattern here (see
+ * ResultColumn, validated on real mobile), so this has zero font/glyph
+ * dependency and renders identically on every platform.
+ */
+const AGENDA_BUTTON_SIZE_WIDE = 44
+const AGENDA_BUTTON_SIZE_COMPACT = 38
+const AGENDA_BUTTON_SPINE_WIDTH = 10
+const AGENDA_BUTTON_LINE_HEIGHT = 2
+
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
 
@@ -295,7 +314,7 @@ export const uiMenu = () => {
     // Gameplay always wins: if the Social Agenda is open and the player's own question
     // now needs attention, close it automatically rather than let it compete for the
     // screen. Opening it in the first place is separately guarded the same way (see
-    // SocialHud's VIEW ALL CONNECTIONS handler). Two triggers: ANSWERING begins WHILE
+    // SocialAgendaButton's own onMouseDown guard). Two triggers: ANSWERING begins WHILE
     // it's already open (the original rule), and - since the gameplay panel at
     // `session.inZone && !socialAgendaOpen` below is otherwise fully hidden behind an
     // open Agenda - walking into the Quest Zone *before joining* with the Agenda left
@@ -337,9 +356,20 @@ export const uiMenu = () => {
                 }}
             >
                 <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                    {/* Single unconditional compact pill on every platform - hidden only during
-                        ANSWERING, same rule everywhere, no separate mobile/desktop treatment. */}
-                    {round.phase !== 'answering' && <SocialHud wide={wide} />}
+                    {/* Fixed HUD group [ CONNECTIONS · N ][ AGENDA ], always visible on every
+                        platform and in every phase (including ANSWERING/ANSWER LOCKED) - same
+                        fixed position and same two elements throughout, never hidden, reordered,
+                        or moved. Information (the count) and action (opening the Agenda) are
+                        deliberately two separate elements now: SocialHud is a pure indicator with
+                        no tap handler, SocialAgendaButton is the only clickable one, and its tap
+                        is disabled (no-op) during ANSWERING/ANSWER LOCKED - see its own doc
+                        comment - so the player can never cover the question or lose response
+                        time, without either element appearing/disappearing between phases. */}
+                    <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <SocialHud wide={wide} />
+                        <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
+                        <SocialAgendaButton wide={wide} />
+                    </UiEntity>
                 </UiEntity>
                 {/* Compact toast presentation for the right slot on every platform - the large
                     cards felt unnecessarily obtrusive and were retired (see ui.tsx history).
@@ -780,15 +810,17 @@ const ResultColumn = ({
 }
 
 /**
- * Persistent social status bar - visible anywhere in the scene, regardless of Quest
- * Zone/join/round state, except during ANSWERING (see uiMenu). Consumes
- * connectionsManager's read API only; no relationship logic is reconstructed here.
- * Single unconditional compact pill on every platform - same structure/text/
- * behavior everywhere, `wide` only nudges fontSize/padding. A tap always opens the
- * Social Agenda overlay directly; there is no expanded inline panel anymore. The
- * whole pill is the tap target (generous padding, not just the text), and the
- * ANSWERING guard below is defense in depth - in practice this pill isn't even
- * rendered during ANSWERING (see uiMenu's `round.phase !== 'answering'` gate).
+ * Persistent social status indicator - visible anywhere in the scene, in
+ * every round phase and join state, with no exceptions, so its position/
+ * visibility is never something the player has to relearn between phases.
+ * Consumes connectionsManager's read API only; no relationship logic is
+ * reconstructed here. Single unconditional compact pill on every platform -
+ * same structure/text everywhere, `wide` only nudges fontSize/padding.
+ *
+ * Information only, no longer an action: it has no tap handler at all -
+ * opening the Social Agenda is SocialAgendaButton's job, the separate
+ * element right next to it (see uiMenu). Splitting the two means this pill
+ * can never accidentally be tapped/misread as a button.
  */
 const SocialHud = ({ wide }: { wide: boolean }) => {
     const total = getTotalConnections()
@@ -801,11 +833,6 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
                 padding: wide ? { top: 12, bottom: 12, left: 16, right: 16 } : { top: 10, bottom: 10, left: 14, right: 14 }
             }}
             uiBackground={{ color: PANEL_BACKGROUND }}
-            onMouseDown={() => {
-                if (roundManager.getSnapshot().phase === 'answering') return
-                socialAgendaPage = 0
-                socialAgendaOpen = true
-            }}
         >
             <Label value={`CONNECTIONS · ${total}`} fontSize={wide ? 18 : 16} color={Color4.White()} />
         </UiEntity>
@@ -813,9 +840,55 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
 }
 
 /**
- * Full-list overlay - opened via SocialHud's VIEW ALL CONNECTIONS button on
- * desktop, or directly from a tap on the compact pill on mobile/compactUi
- * (see SocialHud). Reads connectionsManager's existing getAllConnections()
+ * Opens the Social Agenda overlay - the sole clickable half of the fixed HUD
+ * group (see uiMenu), separate from the read-only CONNECTIONS pill next to
+ * it. Its "notebook" icon is built entirely from plain background rectangles
+ * (a spine strip + two ruled-line bars), not a text glyph or emoji - see
+ * AGENDA_BUTTON_* constants' doc comment for why.
+ *
+ * A tap opens the Social Agenda directly - except during ANSWERING (which
+ * also covers ANSWER LOCKED: roundManager's phase stays 'answering' for
+ * both, only `selectedOption` distinguishes them), where the tap is a no-op.
+ * This is deliberate: the button stays visually stable and in the same
+ * place so the player never loses their sense of where it is, but can't be
+ * used to cover the question or eat into response time while one is live.
+ */
+const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
+    const size = wide ? AGENDA_BUTTON_SIZE_WIDE : AGENDA_BUTTON_SIZE_COMPACT
+    const pagesWidth = size - AGENDA_BUTTON_SPINE_WIDTH
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width: size,
+                height: size,
+                flexDirection: 'row',
+                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
+                borderWidth: 1,
+                borderRadius: 8
+            }}
+            uiBackground={{ color: PANEL_BACKGROUND }}
+            onMouseDown={() => {
+                // Covers ANSWER LOCKED too - see doc comment above.
+                if (roundManager.getSnapshot().phase === 'answering') return
+                socialAgendaPage = 0
+                socialAgendaOpen = true
+            }}
+        >
+            {/* Spine: reads as a notebook's binding edge. */}
+            <UiEntity uiTransform={{ width: AGENDA_BUTTON_SPINE_WIDTH, height: '100%' }} uiBackground={{ color: Color4.create(1, 0.85, 0.2, 1) }} />
+            {/* Pages: two short ruled-line bars, centered. */}
+            <UiEntity uiTransform={{ width: pagesWidth, height: '100%', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
+                <UiEntity uiTransform={{ width: '60%', height: AGENDA_BUTTON_LINE_HEIGHT, margin: { bottom: 4 } }} uiBackground={{ color: MUTED }} />
+                <UiEntity uiTransform={{ width: '60%', height: AGENDA_BUTTON_LINE_HEIGHT }} uiBackground={{ color: MUTED }} />
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * Full-list overlay - opened via SocialAgendaButton (see uiMenu). Reads
+ * connectionsManager's existing getAllConnections()
  * directly - no second list of
  * relationships, no new Connection state. Ordering is whatever getAllConnections()
  * already returns: Map insertion order, i.e. the order each partner was first met
