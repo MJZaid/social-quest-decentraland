@@ -77,6 +77,8 @@ const HUD_TOP_MARGIN = 56
  * before - this constant and its dedicated wrapper only ever apply to `!wide`.
  */
 const MOBILE_HUD_TOP_MARGIN = 28
+/** Small rightward nudge for the mobile HUD pill, off dead-center, per "centrada o ligeramente desplazada a la derecha" - keeps it clear of the top-left avatar/chat/compass cluster. */
+const MOBILE_HUD_RIGHT_OFFSET = 24
 
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
@@ -101,6 +103,20 @@ const MAX_CELEBRATION_NAMES = 3
  */
 const AGENDA_WIDTH_WIDE = 640
 const AGENDA_WIDTH_COMPACT = 460
+
+/**
+ * Mobile-only Social Agenda sizing (compactUi = isMobile() || !wide - see its
+ * doc comment). Percentage strings, not a fixed virtual-unit width like
+ * AGENDA_WIDTH_*: a fixed unit can't reliably express "60-70% of the real
+ * device viewport" across the very different aspect ratios mobile landscape
+ * devices can have, whereas a percentage resolves against the actual
+ * full-screen wrapper this modal already centers in, regardless of device.
+ * Narrow-but-non-mobile desktop windows are unaffected - they still use the
+ * fixed AGENDA_WIDTH_COMPACT exactly as before, since compactUi (not bare
+ * `!wide`) gates this.
+ */
+const MOBILE_AGENDA_WIDTH = '65%'
+const MOBILE_AGENDA_MAX_HEIGHT = '70%'
 
 /**
  * Entries shown per Agenda page. Chosen instead of a scrolling container: the
@@ -369,7 +385,7 @@ export const uiMenu = () => {
                                 (see MOBILE_HUD_TOP_MARGIN below), so it no longer competes vertically
                                 with the gameplay panel on a short mobile-landscape canvas. Still hidden
                                 entirely during ANSWERING either way. */}
-                            {!compactUi && !hideSocialHudMobile && <SocialHud wide={wide} />}
+                            {!compactUi && !hideSocialHudMobile && <SocialHud wide={wide} compactUi={compactUi} />}
                         </UiEntity>
                         {/* Compact toast presentation for the right slot in BOTH wide and normal
                             compact now - the large cards felt unnecessarily obtrusive and were
@@ -409,7 +425,13 @@ export const uiMenu = () => {
                         justifyContent: 'center'
                     }}
                 >
-                    <SocialHud wide={wide} />
+                    {/* Nudged right of dead-center via this margin (not the row's own
+                        justifyContent, which stays 'center' so the nudge is a small, explicit
+                        offset rather than re-anchoring the whole row) - keeps clear of the
+                        avatar/chat/compass cluster in the top-left corner. */}
+                    <UiEntity uiTransform={{ margin: { left: MOBILE_HUD_RIGHT_OFFSET } }}>
+                        <SocialHud wide={wide} compactUi={compactUi} />
+                    </UiEntity>
                 </UiEntity>
             )}
 
@@ -489,7 +511,7 @@ export const uiMenu = () => {
                 open state (see report for why this is the chosen simplest-safe behavior). */}
             {socialAgendaOpen && (
                 <UiEntity uiTransform={{ positionType: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                    <SocialAgenda wide={wide} />
+                    <SocialAgenda wide={wide} compactUi={compactUi} />
                 </UiEntity>
             )}
         </ScreenInsetArea>
@@ -838,8 +860,31 @@ const ResultColumn = ({
  * logic is reconstructed here. Collapsed by default; toggled via a normal click/touch
  * target (no hover dependence, per mobile requirements).
  */
-const SocialHud = ({ wide }: { wide: boolean }) => {
+const SocialHud = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }) => {
     const total = getTotalConnections()
+
+    // Mobile/compact: always the compact pill, regardless of socialHudExpanded
+    // (that module flag stays fully meaningful for desktop only, below) - a tap
+    // opens the Social Agenda modal directly instead of expanding an inline
+    // panel downward over the gameplay area. Guarded the same way desktop's own
+    // VIEW ALL CONNECTIONS button already is, for parity (in practice this
+    // pill isn't even rendered during ANSWERING - see hideSocialHudMobile in
+    // uiMenu - so this is defense in depth, not the primary guard).
+    if (compactUi) {
+        return (
+            <UiEntity
+                uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 10, bottom: 10, left: 14, right: 14 } }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={() => {
+                    if (roundManager.getSnapshot().phase === 'answering') return
+                    socialAgendaPage = 0
+                    socialAgendaOpen = true
+                }}
+            >
+                <Label value={`CONNECTIONS · ${total}`} fontSize={16} color={Color4.White()} />
+            </UiEntity>
+        )
+    }
 
     if (!socialHudExpanded) {
         // The whole pill is the tap target (generous padding, not just the arrow glyph) -
@@ -951,8 +996,10 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
 }
 
 /**
- * Full-list overlay opened via SocialHud's VIEW ALL CONNECTIONS button. Reads
- * connectionsManager's existing getAllConnections() directly - no second list of
+ * Full-list overlay - opened via SocialHud's VIEW ALL CONNECTIONS button on
+ * desktop, or directly from a tap on the compact pill on mobile/compactUi
+ * (see SocialHud). Reads connectionsManager's existing getAllConnections()
+ * directly - no second list of
  * relationships, no new Connection state. Ordering is whatever getAllConnections()
  * already returns: Map insertion order, i.e. the order each partner was first met
  * in, oldest-first - a genuinely stable, deterministic order with no invented
@@ -961,7 +1008,7 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
  * threshold logic duplicated here. Paginated rather than scrolled - see
  * AGENDA_ROWS_PER_PAGE's comment for why.
  */
-const SocialAgenda = ({ wide }: { wide: boolean }) => {
+const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }) => {
     const allConnections = getAllConnections()
     const totalPages = Math.max(1, Math.ceil(allConnections.length / AGENDA_ROWS_PER_PAGE))
     const pageStart = socialAgendaPage * AGENDA_ROWS_PER_PAGE
@@ -975,7 +1022,11 @@ const SocialAgenda = ({ wide }: { wide: boolean }) => {
 
     return (
         <UiEntity
-            uiTransform={{ flexDirection: 'column', width: wide ? AGENDA_WIDTH_WIDE : AGENDA_WIDTH_COMPACT }}
+            uiTransform={
+                compactUi
+                    ? { flexDirection: 'column', width: MOBILE_AGENDA_WIDTH, maxHeight: MOBILE_AGENDA_MAX_HEIGHT }
+                    : { flexDirection: 'column', width: wide ? AGENDA_WIDTH_WIDE : AGENDA_WIDTH_COMPACT }
+            }
             uiBackground={{ color: PANEL_BACKGROUND }}
         >
             {/* Header is the whole-row tap target to close - generous padding (not just the "✕"
@@ -992,7 +1043,7 @@ const SocialAgenda = ({ wide }: { wide: boolean }) => {
                 uiBackground={{ color: PANEL_BACKGROUND }}
                 onMouseDown={close}
             >
-                <Label value="MY CONNECTIONS" fontSize={22} color={Color4.create(1, 0.85, 0.2, 1)} />
+                <Label value="MY SOCIAL QUEST" fontSize={22} color={Color4.create(1, 0.85, 0.2, 1)} />
                 <Label value="✕" fontSize={22} color={Color4.White()} />
             </UiEntity>
 
