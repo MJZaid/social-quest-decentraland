@@ -68,6 +68,16 @@ const VERY_SMALL_MAX_SCALE = 0.4
  */
 const HUD_TOP_MARGIN = 56
 
+/**
+ * Mobile/compact-only vertical position for the Social HUD - roughly level with
+ * Decentraland's own native top button row on mobile, per real-device feedback
+ * that HUD_TOP_MARGIN (56) sits low enough to compete vertically with the
+ * gameplay panel once that panel is centered on a short mobile-landscape
+ * canvas. WIDE/desktop is untouched and keeps using HUD_TOP_MARGIN exactly as
+ * before - this constant and its dedicated wrapper only ever apply to `!wide`.
+ */
+const MOBILE_HUD_TOP_MARGIN = 28
+
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
 
@@ -201,6 +211,20 @@ function mobileAnswerFontSize(text: string): number {
 }
 
 /**
+ * Mobile-landscape WAITING layout - separate pass from ANSWERING above, same
+ * `(isMobile() || !wide) && phase === 'waiting'` gating pattern (see
+ * compactWaiting). Reuses the same MOBILE_ANSWERING_PANEL_ and TITLE_
+ * constants for the shared outer panel (width/padding/title) rather than duplicating
+ * near-identical values - that wrapper is shared scaffolding used by every
+ * phase, not part of the ANSWERING pass itself, so widening its condition to
+ * also cover WAITING does not change anything about the already-validated
+ * ANSWERING layout. Only the WAITING-specific text below is new.
+ */
+const MOBILE_WAITING_TEXT_FONT_SIZE = 22
+const MOBILE_WAITING_TEXT_MARGIN_BOTTOM = 10
+const MOBILE_WAITING_COUNT_FONT_SIZE = 17
+
+/**
  * Reads the SDK-reported live UI canvas size (UiCanvasInformation on engine.RootEntity)
  * and derives the same contain-fit scale factor the renderer itself applies to this
  * scene's declared virtualWidth/virtualHeight (see setupUi above). This is real,
@@ -232,6 +256,29 @@ export const uiMenu = () => {
      * prior `!wide` behavior, unchanged.
      */
     const compactAnswering = (isMobile() || !wide) && round.phase === 'answering'
+    /** Mobile-landscape WAITING only - see MOBILE_WAITING_* constants' doc comment. Independent of compactAnswering; the two are combined below only for the shared outer panel's sizing. */
+    const compactWaiting = (isMobile() || !wide) && round.phase === 'waiting'
+    /** Widens the shared outer panel (width/padding/title) to the compact mobile size for either phase this has been done for so far - RESULT is deliberately not included yet. */
+    const useCompactPanel = compactAnswering || compactWaiting
+    /**
+     * Hides the persistent Social HUD entirely - ANSWERING only, exactly the
+     * originally-validated behavior. WAITING deliberately does NOT hide it
+     * (reverted from a brief broader hide): instead, the mobile HUD is
+     * repositioned higher (see MOBILE_HUD_TOP_MARGIN below) so it no longer
+     * overlaps the gameplay panel during WAITING, to be confirmed against a
+     * real device screenshot before deciding whether hiding is still needed.
+     */
+    const hideSocialHudMobile = compactAnswering
+    /**
+     * Which SocialHud wrapper to use (WIDE's original position vs the mobile
+     * centered one) - deliberately the same robust isMobile()-OR'd signal as
+     * compactAnswering/compactWaiting, not a bare `!wide`. A real device could
+     * in principle compute `wide === true` from its own canvas/devicePixelRatio
+     * combination and never receive the repositioned wrapper if scale were the
+     * only signal here. Used ONLY for this wrapper choice - WAITING/ANSWERING's
+     * own layout and panel sizing keep their own already-established conditions.
+     */
+    const compactUi = isMobile() || !wide
 
     // At most one celebration occupies the notification slot at a time - guaranteed by
     // socialCelebrationQueue.ts itself (a local FIFO presentation queue), not by any
@@ -317,12 +364,12 @@ export const uiMenu = () => {
                 ) : (
                     <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'flex-start' }}>
                         <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                            {/* Hidden entirely (not just collapsed) during mobile-landscape ANSWERING -
-                                the pill sits at HUD_TOP_MARGIN, which overlaps the gameplay panel's own
-                                top edge once the panel is centered on a short mobile-landscape canvas
-                                (confirmed via a real mobile screenshot). Reappears the instant ANSWERING
-                                ends, same as everywhere else in this file. */}
-                            {!compactAnswering && <SocialHud wide={wide} />}
+                            {/* Non-compact (per compactUi) only now - mobile/compact renders SocialHud
+                                in its own separately-positioned, horizontally-centered wrapper instead
+                                (see MOBILE_HUD_TOP_MARGIN below), so it no longer competes vertically
+                                with the gameplay panel on a short mobile-landscape canvas. Still hidden
+                                entirely during ANSWERING either way. */}
+                            {!compactUi && !hideSocialHudMobile && <SocialHud wide={wide} />}
                         </UiEntity>
                         {/* Compact toast presentation for the right slot in BOTH wide and normal
                             compact now - the large cards felt unnecessarily obtrusive and were
@@ -344,6 +391,28 @@ export const uiMenu = () => {
                 )}
             </UiEntity>
 
+            {/* Mobile/compact-only Social HUD position (compactUi, not bare !wide - see its
+                doc comment) - a separate absolutely-positioned, horizontally-centered row,
+                roughly level with Decentraland's own native top button row (see
+                MOBILE_HUD_TOP_MARGIN). Centering it (rather than the right-of-center anchor
+                the non-compact wrapper uses) keeps it clear of the avatar/chat/compass
+                controls in the top-left corner. Excluded during the verySmall+celebrating
+                fallback, matching that the toast alone already owns this region there - same
+                rule the other wrapper above already follows. */}
+            {compactUi && !hideSocialHudMobile && !(verySmall && celebrating) && (
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { top: MOBILE_HUD_TOP_MARGIN },
+                        width: '100%',
+                        flexDirection: 'row',
+                        justifyContent: 'center'
+                    }}
+                >
+                    <SocialHud wide={wide} />
+                </UiEntity>
+            )}
+
             <UiEntity
                 uiTransform={{
                     width: '100%',
@@ -360,8 +429,8 @@ export const uiMenu = () => {
                 {session.inZone && !socialAgendaOpen && (
                     <UiEntity
                         uiTransform={{
-                            width: compactAnswering ? MOBILE_ANSWERING_PANEL_WIDTH : 760,
-                            padding: compactAnswering ? MOBILE_ANSWERING_PANEL_PADDING : 36,
+                            width: useCompactPanel ? MOBILE_ANSWERING_PANEL_WIDTH : 760,
+                            padding: useCompactPanel ? MOBILE_ANSWERING_PANEL_PADDING : 36,
                             flexDirection: 'column',
                             alignItems: 'center'
                         }}
@@ -369,9 +438,9 @@ export const uiMenu = () => {
                     >
                         <Label
                             value="SOCIAL QUEST"
-                            fontSize={compactAnswering ? MOBILE_ANSWERING_TITLE_FONT_SIZE : 56}
+                            fontSize={useCompactPanel ? MOBILE_ANSWERING_TITLE_FONT_SIZE : 56}
                             color={Color4.create(1, 0.85, 0.2, 1)}
-                            uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM : 18 } }}
+                            uiTransform={{ margin: { bottom: useCompactPanel ? MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM : 18 } }}
                         />
 
                         {round.afkMessage === 'removed' ? (
@@ -458,8 +527,9 @@ const JoinedGameplay = () => {
     const { phase, isPending, activeParticipantCount, question, selectedOption, secondsLeft, isRevealing, reveal } =
         roundManager.getSnapshot()
     const wide = getUiScale() >= WIDE_MIN_SCALE
-    // Same isMobile()-OR'd condition as uiMenu's own compactAnswering - see its doc comment.
+    // Same isMobile()-OR'd condition as uiMenu's own compactAnswering/compactWaiting - see their doc comments.
     const compactAnswering = (isMobile() || !wide) && phase === 'answering'
+    const compactWaiting = (isMobile() || !wide) && phase === 'waiting'
 
     if (isPending) {
         return (
@@ -480,13 +550,17 @@ const JoinedGameplay = () => {
             <UiEntity uiTransform={COLUMN_CENTERED}>
                 <Label
                     value="WAITING FOR ANOTHER PLAYER..."
-                    fontSize={32}
+                    fontSize={compactWaiting ? MOBILE_WAITING_TEXT_FONT_SIZE : 32}
                     textAlign="middle-center"
                     textWrap="wrap"
                     color={Color4.White()}
-                    uiTransform={{ width: '100%', margin: { bottom: 16 } }}
+                    uiTransform={{ width: '100%', margin: { bottom: compactWaiting ? MOBILE_WAITING_TEXT_MARGIN_BOTTOM : 16 } }}
                 />
-                <Label value={`${activeParticipantCount} / ${MIN_PLAYERS_REQUIRED}`} fontSize={24} color={MUTED} />
+                <Label
+                    value={`${activeParticipantCount} / ${MIN_PLAYERS_REQUIRED}`}
+                    fontSize={compactWaiting ? MOBILE_WAITING_COUNT_FONT_SIZE : 24}
+                    color={MUTED}
+                />
             </UiEntity>
         )
     }
