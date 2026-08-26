@@ -50,23 +50,17 @@ let socialAgendaPage = 0
 const WIDE_MIN_SCALE = 0.65
 
 /**
- * How far the upper-center social row sits below the very top edge of the safe
- * area - deliberately more than a token amount so it visually reads as part of
- * Social Quest rather than Decentraland's own top bar, per real-Explorer feedback
- * that the top edge itself is native-UI territory.
+ * How far the upper-center social row (Social HUD + celebration toast) sits
+ * below the very top edge of the safe area - ScreenInsetArea already keeps
+ * this clear of the device notch/status bar/rounded corners, so this is only
+ * a small additional nudge, same on every platform. Kept deliberately close
+ * to the top edge so the pill reads as clearly separate from the gameplay
+ * panel below it.
  */
-const HUD_TOP_MARGIN = 56
+const HUD_TOP_MARGIN = 10
 
-/**
- * Compact-only vertical position for the single upper-center row (Social HUD +
- * celebration toast) - roughly level with Decentraland's own native top button
- * row on mobile, per real-device feedback that HUD_TOP_MARGIN (56) sits low
- * enough to compete vertically with the gameplay panel once that panel is
- * centered on a short mobile-landscape canvas. WIDE keeps using HUD_TOP_MARGIN;
- * both share the same one row (see uiMenu), only its `top` offset differs by
- * `compact`.
- */
-const MOBILE_HUD_TOP_MARGIN = 28
+/** Extra vertical separation nudge between the CONNECTIONS pill above and the JOIN panel below it - JOIN only, per real-device feedback that they sat too close together. Every other phase's panel position is untouched. */
+const JOIN_EXTRA_TOP_MARGIN = 16
 
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
@@ -160,10 +154,11 @@ const REVEAL_STATS_ROW_HEIGHT_WIDE = 22
 const REVEAL_STATS_ROW_HEIGHT_COMPACT = 18
 
 /**
- * WAITING now always uses this compact fixed-size outer panel, on every
- * platform (see uiMenu's isWaitingPhase gate) - WAITING's content is minimal
- * (a short message + a count) on any screen size, so there's no reason to
- * reserve the bigger 760-wide panel JOIN/ANSWERING/RESULT use for it anymore.
+ * WAITING always uses this compact fixed-size outer panel, on every platform
+ * (see uiMenu's isWaitingPhase gate) - WAITING's content is minimal (a short
+ * message + a count) on any screen size, so there's no reason to reserve the
+ * bigger GAMEPLAY_PANEL_* size ANSWERING/ANSWER LOCKED/RESULT share for it.
+ * JOIN keeps its own separate, unrelated sizing (see uiMenu) - untouched here.
  */
 const WAITING_PANEL_WIDTH = 480
 const WAITING_PANEL_PADDING = 20
@@ -176,11 +171,28 @@ const WAITING_TEXT_MARGIN_BOTTOM = 10
 const WAITING_COUNT_FONT_SIZE = 17
 
 /**
- * ANSWERING shares the same big outer panel as JOIN/RESULT (see uiMenu) on
- * every platform - only the content sizing below tiers by `compact`
- * (isMobile() || !wide), the same wide/compact-tier pattern RevealResults
- * already uses for RESULT, its already-proven-on-real-mobile reference. No
- * separate mobile-only panel width anymore.
+ * The one shared outer panel for ANSWERING, ANSWER LOCKED, and RESULT (see
+ * uiMenu's isGameplayPanelPhase gate) - same width/padding/position/title on
+ * every platform and across all three phases, with a FIXED height (not
+ * auto) so the panel never resizes across that phase transition: ANSWER
+ * LOCKED's shorter content just leaves blank space at the bottom instead of
+ * shrinking the panel, and RESULT's cards have guaranteed room without ever
+ * having driven the panel's size themselves. The height only tiers by
+ * `compact` (isMobile() || !wide), same signal as everywhere else in this
+ * file - GAMEPLAY_PANEL_HEIGHT_WIDE is sized to comfortably fit RESULT's own
+ * worst case (REVEAL_MAX_NAMES_WIDE names + the "+N MORE" overflow row),
+ * since RESULT's card content itself is unchanged and must always fit.
+ */
+const GAMEPLAY_PANEL_WIDTH = 760
+const GAMEPLAY_PANEL_PADDING = 36
+const GAMEPLAY_PANEL_HEIGHT_WIDE = 540
+const GAMEPLAY_PANEL_HEIGHT_COMPACT = 430
+
+/**
+ * ANSWERING's own content sizing tiers by `compact` (isMobile() || !wide),
+ * the same wide/compact-tier pattern RevealResults already uses for RESULT,
+ * its already-proven-on-real-mobile reference. The outer panel itself is the
+ * shared GAMEPLAY_PANEL_* shell above, not sized here.
  */
 const ANSWERING_QUESTION_FONT_SIZE_WIDE = 32
 const ANSWERING_QUESTION_FONT_SIZE_COMPACT = 24
@@ -259,6 +271,18 @@ export const uiMenu = () => {
     const compact = isMobile() || !wide
     /** WAITING is the one phase whose outer panel is always the small/compact size, on every platform - see WAITING_PANEL_* constants' doc comment. */
     const isWaitingPhase = round.phase === 'waiting'
+    /**
+     * ANSWERING/ANSWER LOCKED/RESULT - the three phases that share the fixed
+     * GAMEPLAY_PANEL_HEIGHT_* shell (see its doc comment). Requires
+     * session.joined: a round already in progress while this player hasn't
+     * joined yet renders JoinScreen (via `round.phase !== 'waiting'`, its own
+     * "JOIN NEXT ROUND" case), not JoinedGameplay - that JOIN screen keeps its
+     * own separate, untouched sizing regardless of round.phase.
+     */
+    const isGameplayPanelPhase = session.joined && (round.phase === 'answering' || round.phase === 'result')
+    /** Mirrors the exact condition JoinScreen renders under, below - used only to add JOIN_EXTRA_TOP_MARGIN to the panel for that one screen. */
+    const showingJoinScreen =
+        session.inZone && !session.joined && session.isSafeToJoin && round.afkMessage !== 'removed' && round.afkMessage !== 'warning'
 
     // At most one celebration occupies the notification slot at a time - guaranteed by
     // socialCelebrationQueue.ts itself (a local FIFO presentation queue), not by any
@@ -290,11 +314,10 @@ export const uiMenu = () => {
             {/* Persistent Social HUD + temporary celebrations, upper-center: real Explorer
                 testing showed all four corners are native-UI territory (Explorer controls
                 top-left/top-right, chat bottom-left, other controls bottom-right), so this is
-                the one region confirmed visually clear. Sits below the safe-area edge rather
-                than flush against it, so it reads as Social Quest UI, not part of
-                Decentraland's own top bar - the exact offset scales by `compact` (see
-                MOBILE_HUD_TOP_MARGIN) since a short mobile-landscape canvas needs the row
-                higher to stay clear of the gameplay panel once that's centered.
+                the one region confirmed visually clear. Sits HUD_TOP_MARGIN below the safe-area
+                edge (ScreenInsetArea already handles the real device safe area) - same small
+                offset on every platform, deliberately close to the top edge so the pill reads
+                as clearly separate from the gameplay panel below it.
 
                 Same fixed two-slot layout on every platform (not "center the group"): a
                 LEFT/ANCHOR slot exactly 50% wide with Connections right-aligned inside it, so
@@ -307,7 +330,7 @@ export const uiMenu = () => {
             <UiEntity
                 uiTransform={{
                     positionType: 'absolute',
-                    position: { top: compact ? MOBILE_HUD_TOP_MARGIN : HUD_TOP_MARGIN },
+                    position: { top: HUD_TOP_MARGIN },
                     width: '100%',
                     flexDirection: 'row',
                     alignItems: 'flex-start'
@@ -352,8 +375,10 @@ export const uiMenu = () => {
                 {session.inZone && !socialAgendaOpen && (
                     <UiEntity
                         uiTransform={{
-                            width: isWaitingPhase ? WAITING_PANEL_WIDTH : 760,
-                            padding: isWaitingPhase ? WAITING_PANEL_PADDING : 36,
+                            width: isWaitingPhase ? WAITING_PANEL_WIDTH : GAMEPLAY_PANEL_WIDTH,
+                            height: isGameplayPanelPhase ? (compact ? GAMEPLAY_PANEL_HEIGHT_COMPACT : GAMEPLAY_PANEL_HEIGHT_WIDE) : undefined,
+                            padding: isWaitingPhase ? WAITING_PANEL_PADDING : GAMEPLAY_PANEL_PADDING,
+                            margin: { top: showingJoinScreen ? JOIN_EXTRA_TOP_MARGIN : 0 },
                             flexDirection: 'column',
                             alignItems: 'center'
                         }}
