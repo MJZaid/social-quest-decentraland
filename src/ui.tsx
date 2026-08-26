@@ -1,6 +1,7 @@
 import ReactEcs, { Button, Label, ReactEcsRenderer, ScreenInsetArea, UiEntity } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, UiCanvasInformation } from '@dcl/sdk/ecs'
+import { isMobile } from '@dcl/sdk/platform'
 import { roundManager, RevealData, RevealEntry } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
@@ -149,6 +150,57 @@ const REVEAL_STATS_ROW_HEIGHT_WIDE = 22
 const REVEAL_STATS_ROW_HEIGHT_COMPACT = 18
 
 /**
+ * Mobile-landscape ANSWERING layout. Gated on `(isMobile() || !wide) && phase
+ * === 'answering'` (see compactAnswering below) - WIDE desktop is completely
+ * untouched, and other phases (JOIN/WAITING/RESULT) keep using the normal
+ * 760-wide panel, matching the reported bug's exact scope (real mobile
+ * screenshot: oversized panel + Connections HUD overlap during ANSWERING
+ * specifically). COMPACT and VERY_SMALL are both `!wide`, so both tiers get
+ * this treatment, per "COMPACT/VERY SMALL debe optimizarse específicamente
+ * para landscape mobile" - and isMobile() additionally guarantees a real
+ * mobile device gets it even if its particular canvas-scale math alone
+ * wouldn't have crossed WIDE_MIN_SCALE.
+ */
+const MOBILE_ANSWERING_PANEL_WIDTH = 480
+const MOBILE_ANSWERING_PANEL_PADDING = 20
+const MOBILE_ANSWERING_TITLE_FONT_SIZE = 24
+const MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM = 6
+const MOBILE_ANSWERING_QUESTION_FONT_SIZE = 24
+const MOBILE_ANSWERING_QUESTION_MARGIN_BOTTOM = 14
+const MOBILE_ANSWERING_TIMER_FONT_SIZE = 16
+const MOBILE_ANSWERING_TIMER_MARGIN_BOTTOM = 12
+const MOBILE_ANSWERING_LOCKED_LABEL_FONT_SIZE = 18
+const MOBILE_ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM = 8
+
+/** Answer buttons side by side within the narrower mobile panel (480 - 2*20 padding = 440 available). */
+const MOBILE_ANSWER_BUTTON_WIDTH = 200
+/**
+ * Tall enough to fit MOBILE_ANSWER_FONT_SIZE_LONG's worst case (the longest
+ * known question-bank option, 43 characters) wrapped to 3 lines without any
+ * part of the text rendering outside the button's visual bounds - the exact
+ * bug reported ("Early" escaping the button on a 2-line-wrapped option). Native
+ * Button height is otherwise fixed and does not grow to fit wrapped content
+ * (same underlying Yoga/text-measurement limitation already documented for
+ * Label elsewhere in this file), so this must be sized generously up front
+ * rather than left to measure itself.
+ */
+const MOBILE_ANSWER_BUTTON_HEIGHT = 120
+const MOBILE_ANSWER_BUTTON_GAP = 10
+
+/** Dynamic font-size steps for the mobile answer buttons, by option text length - keeps a long option's 3 wrapped lines fitting within MOBILE_ANSWER_BUTTON_HEIGHT instead of overflowing it. */
+const MOBILE_ANSWER_FONT_SIZE_SHORT = 20
+const MOBILE_ANSWER_FONT_SIZE_MEDIUM = 17
+const MOBILE_ANSWER_FONT_SIZE_LONG = 14
+const MOBILE_ANSWER_SHORT_MAX_CHARS = 16
+const MOBILE_ANSWER_MEDIUM_MAX_CHARS = 28
+
+function mobileAnswerFontSize(text: string): number {
+    if (text.length <= MOBILE_ANSWER_SHORT_MAX_CHARS) return MOBILE_ANSWER_FONT_SIZE_SHORT
+    if (text.length <= MOBILE_ANSWER_MEDIUM_MAX_CHARS) return MOBILE_ANSWER_FONT_SIZE_MEDIUM
+    return MOBILE_ANSWER_FONT_SIZE_LONG
+}
+
+/**
  * Reads the SDK-reported live UI canvas size (UiCanvasInformation on engine.RootEntity)
  * and derives the same contain-fit scale factor the renderer itself applies to this
  * scene's declared virtualWidth/virtualHeight (see setupUi above). This is real,
@@ -168,6 +220,18 @@ export const uiMenu = () => {
     const scale = getUiScale()
     const wide = scale >= WIDE_MIN_SCALE
     const verySmall = scale < VERY_SMALL_MAX_SCALE
+    /**
+     * Mobile-landscape ANSWERING only - see MOBILE_ANSWERING_* constants' doc comment.
+     * isMobile() (the Explorer's own reported platform, from @dcl/sdk/platform) is
+     * OR'd in alongside the existing scale check rather than replacing it: a real
+     * device's canvas-scale math depends on devicePixelRatio in a way that isn't
+     * reliably knowable from scene code alone, so a phone could in principle compute
+     * `wide === true` and never receive this layout if scale were the only signal.
+     * OR-ing means this can only ever WIDEN which cases get the compact layout, never
+     * narrow it - desktop (isMobile() always false there) still reduces to exactly the
+     * prior `!wide` behavior, unchanged.
+     */
+    const compactAnswering = (isMobile() || !wide) && round.phase === 'answering'
 
     // At most one celebration occupies the notification slot at a time - guaranteed by
     // socialCelebrationQueue.ts itself (a local FIFO presentation queue), not by any
@@ -253,7 +317,12 @@ export const uiMenu = () => {
                 ) : (
                     <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'flex-start' }}>
                         <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                            <SocialHud wide={wide} />
+                            {/* Hidden entirely (not just collapsed) during mobile-landscape ANSWERING -
+                                the pill sits at HUD_TOP_MARGIN, which overlaps the gameplay panel's own
+                                top edge once the panel is centered on a short mobile-landscape canvas
+                                (confirmed via a real mobile screenshot). Reappears the instant ANSWERING
+                                ends, same as everywhere else in this file. */}
+                            {!compactAnswering && <SocialHud wide={wide} />}
                         </UiEntity>
                         {/* Compact toast presentation for the right slot in BOTH wide and normal
                             compact now - the large cards felt unnecessarily obtrusive and were
@@ -291,8 +360,8 @@ export const uiMenu = () => {
                 {session.inZone && !socialAgendaOpen && (
                     <UiEntity
                         uiTransform={{
-                            width: 760,
-                            padding: 36,
+                            width: compactAnswering ? MOBILE_ANSWERING_PANEL_WIDTH : 760,
+                            padding: compactAnswering ? MOBILE_ANSWERING_PANEL_PADDING : 36,
                             flexDirection: 'column',
                             alignItems: 'center'
                         }}
@@ -300,9 +369,9 @@ export const uiMenu = () => {
                     >
                         <Label
                             value="SOCIAL QUEST"
-                            fontSize={56}
+                            fontSize={compactAnswering ? MOBILE_ANSWERING_TITLE_FONT_SIZE : 56}
                             color={Color4.create(1, 0.85, 0.2, 1)}
-                            uiTransform={{ margin: { bottom: 18 } }}
+                            uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM : 18 } }}
                         />
 
                         {round.afkMessage === 'removed' ? (
@@ -388,6 +457,9 @@ const JoinScreen = () => {
 const JoinedGameplay = () => {
     const { phase, isPending, activeParticipantCount, question, selectedOption, secondsLeft, isRevealing, reveal } =
         roundManager.getSnapshot()
+    const wide = getUiScale() >= WIDE_MIN_SCALE
+    // Same isMobile()-OR'd condition as uiMenu's own compactAnswering - see its doc comment.
+    const compactAnswering = (isMobile() || !wide) && phase === 'answering'
 
     if (isPending) {
         return (
@@ -428,32 +500,47 @@ const JoinedGameplay = () => {
         <UiEntity uiTransform={COLUMN_CENTERED}>
             <Label
                 value={activeQuestion.question}
-                fontSize={32}
+                fontSize={compactAnswering ? MOBILE_ANSWERING_QUESTION_FONT_SIZE : 32}
                 textAlign="middle-center"
                 textWrap="wrap"
                 color={Color4.White()}
-                uiTransform={{ width: '100%', margin: { bottom: 28 } }}
+                uiTransform={{ width: '100%', margin: { bottom: compactAnswering ? MOBILE_ANSWERING_QUESTION_MARGIN_BOTTOM : 28 } }}
             />
 
             {phase === 'answering' ? (
                 <UiEntity uiTransform={COLUMN_CENTERED}>
                     {/* Countdown: visible but kept small so it stays secondary to the question/buttons */}
-                    <Label value={`${secondsLeft}s`} fontSize={24} color={MUTED} uiTransform={{ margin: { bottom: 28 } }} />
+                    <Label
+                        value={`${secondsLeft}s`}
+                        fontSize={compactAnswering ? MOBILE_ANSWERING_TIMER_FONT_SIZE : 24}
+                        color={MUTED}
+                        uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_TIMER_MARGIN_BOTTOM : 28 } }}
+                    />
 
                     {selectedOption === null ? (
                         <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
                             <Button
                                 value={activeQuestion.optionA}
                                 variant="primary"
-                                fontSize={30}
-                                uiTransform={{ width: 260, height: 100, margin: { right: 16 } }}
+                                fontSize={compactAnswering ? mobileAnswerFontSize(activeQuestion.optionA) : 30}
+                                textWrap="wrap"
+                                uiTransform={
+                                    compactAnswering
+                                        ? { width: MOBILE_ANSWER_BUTTON_WIDTH, height: MOBILE_ANSWER_BUTTON_HEIGHT, margin: { right: MOBILE_ANSWER_BUTTON_GAP } }
+                                        : { width: 260, height: 100, margin: { right: 16 } }
+                                }
                                 onMouseDown={() => roundManager.selectOption('A')}
                             />
                             <Button
                                 value={activeQuestion.optionB}
                                 variant="primary"
-                                fontSize={30}
-                                uiTransform={{ width: 260, height: 100, margin: { left: 16 } }}
+                                fontSize={compactAnswering ? mobileAnswerFontSize(activeQuestion.optionB) : 30}
+                                textWrap="wrap"
+                                uiTransform={
+                                    compactAnswering
+                                        ? { width: MOBILE_ANSWER_BUTTON_WIDTH, height: MOBILE_ANSWER_BUTTON_HEIGHT, margin: { left: MOBILE_ANSWER_BUTTON_GAP } }
+                                        : { width: 260, height: 100, margin: { left: 16 } }
+                                }
                                 onMouseDown={() => roundManager.selectOption('B')}
                             />
                         </UiEntity>
@@ -461,11 +548,18 @@ const JoinedGameplay = () => {
                         <UiEntity uiTransform={COLUMN_CENTERED}>
                             <Label
                                 value="ANSWER LOCKED"
-                                fontSize={32}
+                                fontSize={compactAnswering ? MOBILE_ANSWERING_LOCKED_LABEL_FONT_SIZE : 32}
                                 color={Color4.create(0.6, 1, 0.6, 1)}
-                                uiTransform={{ margin: { bottom: 12 } }}
+                                uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM : 12 } }}
                             />
-                            <Label value={selectedLabel as string} fontSize={48} color={Color4.White()} />
+                            <Label
+                                value={selectedLabel as string}
+                                fontSize={compactAnswering ? mobileAnswerFontSize(selectedLabel as string) : 48}
+                                textAlign="middle-center"
+                                textWrap="wrap"
+                                color={Color4.White()}
+                                uiTransform={compactAnswering ? { width: '100%' } : undefined}
+                            />
                         </UiEntity>
                     )}
                 </UiEntity>
