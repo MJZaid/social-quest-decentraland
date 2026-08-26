@@ -5,7 +5,7 @@ import { isMobile } from '@dcl/sdk/platform'
 import { roundManager, RevealData, RevealEntry } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
-import { getTotalConnections, getRecentConnections, getDisplayNameFor, getConnection, getAllConnections } from './connectionsManager'
+import { getTotalConnections, getDisplayNameFor, getAllConnections } from './connectionsManager'
 import { getFriendshipLevel } from './friendshipManager'
 import {
     getPresentedCelebration,
@@ -34,9 +34,6 @@ const PANEL_BACKGROUND = Color4.create(0.05, 0.05, 0.1, 0.85)
 /** Never used as an identity - purely a friendly presentation fallback when a name can't be resolved. */
 const QUESTMATE_FALLBACK = 'Questmate'
 
-/** Collapse/expand is presentation-only and local to this client - never synced. Default: collapsed. */
-let socialHudExpanded = false
-
 /** Whether the Social Agenda ("VIEW ALL CONNECTIONS") overlay is open - presentation-only, local, never synced. Default: closed. */
 let socialAgendaOpen = false
 /** Current 0-based Agenda page - reset to 0 every time the Agenda is opened, so a re-open never resumes on a stale page. */
@@ -53,14 +50,6 @@ let socialAgendaPage = 0
 const WIDE_MIN_SCALE = 0.65
 
 /**
- * Below this render scale, space is tight enough that gameplay must win outright:
- * the Social HUD is forced collapsed unconditionally (not just during ANSWERING as
- * in the normal COMPACT rule), on top of the COMPACT narrowing already in effect.
- * Chosen well below WIDE_MIN_SCALE so it only engages on genuinely small viewports.
- */
-const VERY_SMALL_MAX_SCALE = 0.4
-
-/**
  * How far the upper-center social row sits below the very top edge of the safe
  * area - deliberately more than a token amount so it visually reads as part of
  * Social Quest rather than Decentraland's own top bar, per real-Explorer feedback
@@ -69,26 +58,21 @@ const VERY_SMALL_MAX_SCALE = 0.4
 const HUD_TOP_MARGIN = 56
 
 /**
- * Mobile/compact-only vertical position for the Social HUD - roughly level with
- * Decentraland's own native top button row on mobile, per real-device feedback
- * that HUD_TOP_MARGIN (56) sits low enough to compete vertically with the
- * gameplay panel once that panel is centered on a short mobile-landscape
- * canvas. WIDE/desktop is untouched and keeps using HUD_TOP_MARGIN exactly as
- * before - this constant and its dedicated wrapper only ever apply to `!wide`.
+ * Compact-only vertical position for the single upper-center row (Social HUD +
+ * celebration toast) - roughly level with Decentraland's own native top button
+ * row on mobile, per real-device feedback that HUD_TOP_MARGIN (56) sits low
+ * enough to compete vertically with the gameplay panel once that panel is
+ * centered on a short mobile-landscape canvas. WIDE keeps using HUD_TOP_MARGIN;
+ * both share the same one row (see uiMenu), only its `top` offset differs by
+ * `compact`.
  */
 const MOBILE_HUD_TOP_MARGIN = 28
-/** Small rightward nudge for the mobile HUD pill, off dead-center, per "centrada o ligeramente desplazada a la derecha" - keeps it clear of the top-left avatar/chat/compass cluster. */
-const MOBILE_HUD_RIGHT_OFFSET = 24
 
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
 
 /** Horizontal gap between the collapsed HUD pill and a compact celebration toast when shown side by side in normal COMPACT. Smaller than WIDE_ROW_GAP since compact horizontal room is tighter. */
 const COMPACT_ROW_GAP = 16
-
-/** Expanded HUD panel width: WIDE uses the original size, COMPACT narrows it so it demands less of a small canvas's width. */
-const HUD_EXPANDED_WIDTH_WIDE = 280
-const HUD_EXPANDED_WIDTH_COMPACT = 230
 
 /** Names shown before collapsing the rest into "+N" - shared by both compact toasts. */
 const MAX_CELEBRATION_NAMES = 3
@@ -176,69 +160,71 @@ const REVEAL_STATS_ROW_HEIGHT_WIDE = 22
 const REVEAL_STATS_ROW_HEIGHT_COMPACT = 18
 
 /**
- * Mobile-landscape ANSWERING layout. Gated on `(isMobile() || !wide) && phase
- * === 'answering'` (see compactAnswering below) - WIDE desktop is completely
- * untouched, and other phases (JOIN/WAITING/RESULT) keep using the normal
- * 760-wide panel, matching the reported bug's exact scope (real mobile
- * screenshot: oversized panel + Connections HUD overlap during ANSWERING
- * specifically). COMPACT and VERY_SMALL are both `!wide`, so both tiers get
- * this treatment, per "COMPACT/VERY SMALL debe optimizarse específicamente
- * para landscape mobile" - and isMobile() additionally guarantees a real
- * mobile device gets it even if its particular canvas-scale math alone
- * wouldn't have crossed WIDE_MIN_SCALE.
+ * WAITING now always uses this compact fixed-size outer panel, on every
+ * platform (see uiMenu's isWaitingPhase gate) - WAITING's content is minimal
+ * (a short message + a count) on any screen size, so there's no reason to
+ * reserve the bigger 760-wide panel JOIN/ANSWERING/RESULT use for it anymore.
  */
-const MOBILE_ANSWERING_PANEL_WIDTH = 480
-const MOBILE_ANSWERING_PANEL_PADDING = 20
-const MOBILE_ANSWERING_TITLE_FONT_SIZE = 24
-const MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM = 6
-const MOBILE_ANSWERING_QUESTION_FONT_SIZE = 24
-const MOBILE_ANSWERING_QUESTION_MARGIN_BOTTOM = 14
-const MOBILE_ANSWERING_TIMER_FONT_SIZE = 16
-const MOBILE_ANSWERING_TIMER_MARGIN_BOTTOM = 12
-const MOBILE_ANSWERING_LOCKED_LABEL_FONT_SIZE = 18
-const MOBILE_ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM = 8
+const WAITING_PANEL_WIDTH = 480
+const WAITING_PANEL_PADDING = 20
+const WAITING_TITLE_FONT_SIZE = 24
+const WAITING_TITLE_MARGIN_BOTTOM = 6
 
-/** Answer buttons side by side within the narrower mobile panel (480 - 2*20 padding = 440 available). */
-const MOBILE_ANSWER_BUTTON_WIDTH = 200
+/** WAITING's own text - fixed, unconditional values now (no wide/compact tiering): the same compact sizing applies on every platform. */
+const WAITING_TEXT_FONT_SIZE = 22
+const WAITING_TEXT_MARGIN_BOTTOM = 10
+const WAITING_COUNT_FONT_SIZE = 17
+
 /**
- * Tall enough to fit MOBILE_ANSWER_FONT_SIZE_LONG's worst case (the longest
- * known question-bank option, 43 characters) wrapped to 3 lines without any
- * part of the text rendering outside the button's visual bounds - the exact
- * bug reported ("Early" escaping the button on a 2-line-wrapped option). Native
- * Button height is otherwise fixed and does not grow to fit wrapped content
- * (same underlying Yoga/text-measurement limitation already documented for
- * Label elsewhere in this file), so this must be sized generously up front
- * rather than left to measure itself.
+ * ANSWERING shares the same big outer panel as JOIN/RESULT (see uiMenu) on
+ * every platform - only the content sizing below tiers by `compact`
+ * (isMobile() || !wide), the same wide/compact-tier pattern RevealResults
+ * already uses for RESULT, its already-proven-on-real-mobile reference. No
+ * separate mobile-only panel width anymore.
  */
-const MOBILE_ANSWER_BUTTON_HEIGHT = 120
-const MOBILE_ANSWER_BUTTON_GAP = 10
+const ANSWERING_QUESTION_FONT_SIZE_WIDE = 32
+const ANSWERING_QUESTION_FONT_SIZE_COMPACT = 24
+const ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE = 28
+const ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT = 14
+const ANSWERING_TIMER_FONT_SIZE_WIDE = 24
+const ANSWERING_TIMER_FONT_SIZE_COMPACT = 16
+const ANSWERING_TIMER_MARGIN_BOTTOM_WIDE = 28
+const ANSWERING_TIMER_MARGIN_BOTTOM_COMPACT = 12
+const ANSWERING_LOCKED_LABEL_FONT_SIZE_WIDE = 32
+const ANSWERING_LOCKED_LABEL_FONT_SIZE_COMPACT = 18
+const ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_WIDE = 12
+const ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_COMPACT = 8
 
-/** Dynamic font-size steps for the mobile answer buttons, by option text length - keeps a long option's 3 wrapped lines fitting within MOBILE_ANSWER_BUTTON_HEIGHT instead of overflowing it. */
-const MOBILE_ANSWER_FONT_SIZE_SHORT = 20
-const MOBILE_ANSWER_FONT_SIZE_MEDIUM = 17
-const MOBILE_ANSWER_FONT_SIZE_LONG = 14
-const MOBILE_ANSWER_SHORT_MAX_CHARS = 16
-const MOBILE_ANSWER_MEDIUM_MAX_CHARS = 28
+/**
+ * Answer buttons side by side on every platform. Sized generously up front
+ * (not left to auto-measure) for the same reason documented on the reveal
+ * name-list fix: a wrapped Label's measured height isn't reliably fed back
+ * into this SDK's flex layout. COMPACT keeps the exact values already
+ * validated against a real mobile device in production; WIDE keeps its
+ * original desktop size.
+ */
+const ANSWER_BUTTON_WIDTH_WIDE = 260
+const ANSWER_BUTTON_HEIGHT_WIDE = 100
+const ANSWER_BUTTON_GAP_WIDE = 16
+const ANSWER_BUTTON_WIDTH_COMPACT = 200
+const ANSWER_BUTTON_HEIGHT_COMPACT = 120
+const ANSWER_BUTTON_GAP_COMPACT = 10
 
-function mobileAnswerFontSize(text: string): number {
-    if (text.length <= MOBILE_ANSWER_SHORT_MAX_CHARS) return MOBILE_ANSWER_FONT_SIZE_SHORT
-    if (text.length <= MOBILE_ANSWER_MEDIUM_MAX_CHARS) return MOBILE_ANSWER_FONT_SIZE_MEDIUM
-    return MOBILE_ANSWER_FONT_SIZE_LONG
+/** Dynamic font-size steps by option text length, now applied on BOTH tiers (previously compact-only) - a long option can't overflow its button on desktop either. */
+const ANSWER_FONT_SIZE_SHORT_WIDE = 30
+const ANSWER_FONT_SIZE_MEDIUM_WIDE = 24
+const ANSWER_FONT_SIZE_LONG_WIDE = 18
+const ANSWER_FONT_SIZE_SHORT_COMPACT = 20
+const ANSWER_FONT_SIZE_MEDIUM_COMPACT = 17
+const ANSWER_FONT_SIZE_LONG_COMPACT = 14
+const ANSWER_SHORT_MAX_CHARS = 16
+const ANSWER_MEDIUM_MAX_CHARS = 28
+
+function answerFontSize(text: string, compact: boolean): number {
+    if (text.length <= ANSWER_SHORT_MAX_CHARS) return compact ? ANSWER_FONT_SIZE_SHORT_COMPACT : ANSWER_FONT_SIZE_SHORT_WIDE
+    if (text.length <= ANSWER_MEDIUM_MAX_CHARS) return compact ? ANSWER_FONT_SIZE_MEDIUM_COMPACT : ANSWER_FONT_SIZE_MEDIUM_WIDE
+    return compact ? ANSWER_FONT_SIZE_LONG_COMPACT : ANSWER_FONT_SIZE_LONG_WIDE
 }
-
-/**
- * Mobile-landscape WAITING layout - separate pass from ANSWERING above, same
- * `(isMobile() || !wide) && phase === 'waiting'` gating pattern (see
- * compactWaiting). Reuses the same MOBILE_ANSWERING_PANEL_ and TITLE_
- * constants for the shared outer panel (width/padding/title) rather than duplicating
- * near-identical values - that wrapper is shared scaffolding used by every
- * phase, not part of the ANSWERING pass itself, so widening its condition to
- * also cover WAITING does not change anything about the already-validated
- * ANSWERING layout. Only the WAITING-specific text below is new.
- */
-const MOBILE_WAITING_TEXT_FONT_SIZE = 22
-const MOBILE_WAITING_TEXT_MARGIN_BOTTOM = 10
-const MOBILE_WAITING_COUNT_FONT_SIZE = 17
 
 /**
  * Reads the SDK-reported live UI canvas size (UiCanvasInformation on engine.RootEntity)
@@ -259,42 +245,20 @@ export const uiMenu = () => {
     const round = roundManager.getSnapshot()
     const scale = getUiScale()
     const wide = scale >= WIDE_MIN_SCALE
-    const verySmall = scale < VERY_SMALL_MAX_SCALE
     /**
-     * Mobile-landscape ANSWERING only - see MOBILE_ANSWERING_* constants' doc comment.
-     * isMobile() (the Explorer's own reported platform, from @dcl/sdk/platform) is
-     * OR'd in alongside the existing scale check rather than replacing it: a real
-     * device's canvas-scale math depends on devicePixelRatio in a way that isn't
-     * reliably knowable from scene code alone, so a phone could in principle compute
-     * `wide === true` and never receive this layout if scale were the only signal.
-     * OR-ing means this can only ever WIDEN which cases get the compact layout, never
-     * narrow it - desktop (isMobile() always false there) still reduces to exactly the
-     * prior `!wide` behavior, unchanged.
+     * The one responsive signal reused everywhere in this file that needs a
+     * compact/full-size tier decision. isMobile() (the Explorer's own reported
+     * platform, from @dcl/sdk/platform) is OR'd in alongside the scale check
+     * rather than replacing it: a real device's canvas-scale math depends on
+     * devicePixelRatio in a way that isn't reliably knowable from scene code
+     * alone, so a phone could in principle compute `wide === true` and miss
+     * compact treatment if scale were the only signal. OR-ing can only WIDEN
+     * which cases get the compact tier, never narrow it - desktop (isMobile()
+     * always false there) still reduces to exactly `!wide`.
      */
-    const compactAnswering = (isMobile() || !wide) && round.phase === 'answering'
-    /** Mobile-landscape WAITING only - see MOBILE_WAITING_* constants' doc comment. Independent of compactAnswering; the two are combined below only for the shared outer panel's sizing. */
-    const compactWaiting = (isMobile() || !wide) && round.phase === 'waiting'
-    /** Widens the shared outer panel (width/padding/title) to the compact mobile size for either phase this has been done for so far - RESULT is deliberately not included yet. */
-    const useCompactPanel = compactAnswering || compactWaiting
-    /**
-     * Hides the persistent Social HUD entirely - ANSWERING only, exactly the
-     * originally-validated behavior. WAITING deliberately does NOT hide it
-     * (reverted from a brief broader hide): instead, the mobile HUD is
-     * repositioned higher (see MOBILE_HUD_TOP_MARGIN below) so it no longer
-     * overlaps the gameplay panel during WAITING, to be confirmed against a
-     * real device screenshot before deciding whether hiding is still needed.
-     */
-    const hideSocialHudMobile = compactAnswering
-    /**
-     * Which SocialHud wrapper to use (WIDE's original position vs the mobile
-     * centered one) - deliberately the same robust isMobile()-OR'd signal as
-     * compactAnswering/compactWaiting, not a bare `!wide`. A real device could
-     * in principle compute `wide === true` from its own canvas/devicePixelRatio
-     * combination and never receive the repositioned wrapper if scale were the
-     * only signal here. Used ONLY for this wrapper choice - WAITING/ANSWERING's
-     * own layout and panel sizing keep their own already-established conditions.
-     */
-    const compactUi = isMobile() || !wide
+    const compact = isMobile() || !wide
+    /** WAITING is the one phase whose outer panel is always the small/compact size, on every platform - see WAITING_PANEL_* constants' doc comment. */
+    const isWaitingPhase = round.phase === 'waiting'
 
     // At most one celebration occupies the notification slot at a time - guaranteed by
     // socialCelebrationQueue.ts itself (a local FIFO presentation queue), not by any
@@ -303,27 +267,6 @@ export const uiMenu = () => {
     const presented = getPresentedCelebration()
     const presentedNewConnection = presented?.type === 'NEW_CONNECTION' ? presented : null
     const presentedFriendship = presented?.type === 'FRIENDSHIP' ? presented : null
-    const celebrating = presented !== null
-
-    // Whether the Connections pill/panel is shown at all this render. WIDE always shows it.
-    // Normal COMPACT (not wide, but not verySmall either) also keeps it visible side by side
-    // with a celebration toast - there's genuinely enough horizontal room there. Only the
-    // very-small fallback (scale < VERY_SMALL_MAX_SCALE, the same canvas-scale signal already
-    // used to force-collapse elsewhere) hides it in favor of the toast alone, restoring it
-    // automatically once the celebration's own snapshot goes null.
-    const showHud = !(verySmall && celebrating)
-
-    // Compact screens give gameplay priority: an expanded HUD auto-collapses to the pill the
-    // moment a new ANSWERING phase begins, so it can never sit over the answer buttons. The
-    // same applies the moment a celebration is active in COMPACT/very-small - the expanded
-    // MY SOCIAL QUEST panel is never shown alongside or instead of a celebration, only the
-    // collapsed pill (or nothing, in the very-small fallback) is, so it always comes back
-    // collapsed once the celebration clears. Very small screens go further and force it
-    // collapsed unconditionally, regardless of phase. Wide screens keep the HUD and a full
-    // celebration card side by side and are left alone.
-    if (socialHudExpanded && (verySmall || (!wide && (round.phase === 'answering' || celebrating)))) {
-        socialHudExpanded = false
-    }
 
     // Gameplay always wins: if the Social Agenda is open and the player's own question
     // now needs attention, close it automatically rather than let it compete for the
@@ -347,93 +290,51 @@ export const uiMenu = () => {
             {/* Persistent Social HUD + temporary celebrations, upper-center: real Explorer
                 testing showed all four corners are native-UI territory (Explorer controls
                 top-left/top-right, chat bottom-left, other controls bottom-right), so this is
-                the one region confirmed visually clear. Sits HUD_TOP_MARGIN below the safe-area
-                edge rather than flush against it, so it reads as Social Quest UI, not part of
-                Decentraland's own top bar.
+                the one region confirmed visually clear. Sits below the safe-area edge rather
+                than flush against it, so it reads as Social Quest UI, not part of
+                Decentraland's own top bar - the exact offset scales by `compact` (see
+                MOBILE_HUD_TOP_MARGIN) since a short mobile-landscape canvas needs the row
+                higher to stay clear of the gameplay panel once that's centered.
 
-                Fixed two-slot layout (not "center the group"): a LEFT/ANCHOR slot exactly 50%
-                wide with Connections right-aligned inside it, so Connections' right edge always
-                sits exactly on the horizontal center line - and a RIGHT slot, also always 50%
-                wide whether or not it has content, holding the current celebration left-aligned
-                just past that same line. Because both slot widths are fixed regardless of
-                content, Connections' anchor can never shift when a celebration appears or
-                disappears - unlike centering the pair as a single group, which moved Connections
-                depending on the celebration's width. */}
+                Same fixed two-slot layout on every platform (not "center the group"): a
+                LEFT/ANCHOR slot exactly 50% wide with Connections right-aligned inside it, so
+                Connections' right edge always sits exactly on the horizontal center line - and
+                a RIGHT slot, also always 50% wide whether or not it has content, holding the
+                current celebration left-aligned just past that same line. Because both slot
+                widths are fixed regardless of content, Connections' anchor can never shift when
+                a celebration appears or disappears - unlike centering the pair as a single
+                group, which moved Connections depending on the celebration's width. */}
             <UiEntity
                 uiTransform={{
                     positionType: 'absolute',
-                    position: { top: HUD_TOP_MARGIN },
+                    position: { top: compact ? MOBILE_HUD_TOP_MARGIN : HUD_TOP_MARGIN },
                     width: '100%',
                     flexDirection: 'row',
                     alignItems: 'flex-start'
                 }}
             >
-                {verySmall && celebrating ? (
-                    // Very-small fallback only: no anchor slot here at all - Connections is
-                    // fully hidden (showHud false) and the toast takes the whole row, centered,
-                    // per the manually-approved fallback. Connections resumes its normal
-                    // left-of-center anchor automatically once celebrating goes false again.
-                    <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
-                        {presentedNewConnection && <NewConnectionToast data={presentedNewConnection} />}
-                        {presentedFriendship && <FriendshipToast data={presentedFriendship} />}
-                    </UiEntity>
-                ) : (
-                    <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'flex-start' }}>
-                        <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                            {/* Non-compact (per compactUi) only now - mobile/compact renders SocialHud
-                                in its own separately-positioned, horizontally-centered wrapper instead
-                                (see MOBILE_HUD_TOP_MARGIN below), so it no longer competes vertically
-                                with the gameplay panel on a short mobile-landscape canvas. Still hidden
-                                entirely during ANSWERING either way. */}
-                            {!compactUi && !hideSocialHudMobile && <SocialHud wide={wide} compactUi={compactUi} />}
-                        </UiEntity>
-                        {/* Compact toast presentation for the right slot in BOTH wide and normal
-                            compact now - the large cards felt unnecessarily obtrusive and were
-                            retired (see ui.tsx history). The breakpoint still only affects the
-                            gap width here, never which presentation is chosen. */}
-                        <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
-                            {presentedNewConnection && (
-                                <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
-                                    <NewConnectionToast data={presentedNewConnection} />
-                                </UiEntity>
-                            )}
-                            {presentedFriendship && (
-                                <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
-                                    <FriendshipToast data={presentedFriendship} />
-                                </UiEntity>
-                            )}
-                        </UiEntity>
-                    </UiEntity>
-                )}
-            </UiEntity>
-
-            {/* Mobile/compact-only Social HUD position (compactUi, not bare !wide - see its
-                doc comment) - a separate absolutely-positioned, horizontally-centered row,
-                roughly level with Decentraland's own native top button row (see
-                MOBILE_HUD_TOP_MARGIN). Centering it (rather than the right-of-center anchor
-                the non-compact wrapper uses) keeps it clear of the avatar/chat/compass
-                controls in the top-left corner. Excluded during the verySmall+celebrating
-                fallback, matching that the toast alone already owns this region there - same
-                rule the other wrapper above already follows. */}
-            {compactUi && !hideSocialHudMobile && !(verySmall && celebrating) && (
-                <UiEntity
-                    uiTransform={{
-                        positionType: 'absolute',
-                        position: { top: MOBILE_HUD_TOP_MARGIN },
-                        width: '100%',
-                        flexDirection: 'row',
-                        justifyContent: 'center'
-                    }}
-                >
-                    {/* Nudged right of dead-center via this margin (not the row's own
-                        justifyContent, which stays 'center' so the nudge is a small, explicit
-                        offset rather than re-anchoring the whole row) - keeps clear of the
-                        avatar/chat/compass cluster in the top-left corner. */}
-                    <UiEntity uiTransform={{ margin: { left: MOBILE_HUD_RIGHT_OFFSET } }}>
-                        <SocialHud wide={wide} compactUi={compactUi} />
-                    </UiEntity>
+                <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
+                    {/* Single unconditional compact pill on every platform - hidden only during
+                        ANSWERING, same rule everywhere, no separate mobile/desktop treatment. */}
+                    {round.phase !== 'answering' && <SocialHud wide={wide} />}
                 </UiEntity>
-            )}
+                {/* Compact toast presentation for the right slot on every platform - the large
+                    cards felt unnecessarily obtrusive and were retired (see ui.tsx history).
+                    `wide` still only affects the gap width here, never which presentation is
+                    chosen. */}
+                <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
+                    {presentedNewConnection && (
+                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
+                            <NewConnectionToast data={presentedNewConnection} />
+                        </UiEntity>
+                    )}
+                    {presentedFriendship && (
+                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
+                            <FriendshipToast data={presentedFriendship} />
+                        </UiEntity>
+                    )}
+                </UiEntity>
+            </UiEntity>
 
             <UiEntity
                 uiTransform={{
@@ -451,8 +352,8 @@ export const uiMenu = () => {
                 {session.inZone && !socialAgendaOpen && (
                     <UiEntity
                         uiTransform={{
-                            width: useCompactPanel ? MOBILE_ANSWERING_PANEL_WIDTH : 760,
-                            padding: useCompactPanel ? MOBILE_ANSWERING_PANEL_PADDING : 36,
+                            width: isWaitingPhase ? WAITING_PANEL_WIDTH : 760,
+                            padding: isWaitingPhase ? WAITING_PANEL_PADDING : 36,
                             flexDirection: 'column',
                             alignItems: 'center'
                         }}
@@ -460,9 +361,9 @@ export const uiMenu = () => {
                     >
                         <Label
                             value="SOCIAL QUEST"
-                            fontSize={useCompactPanel ? MOBILE_ANSWERING_TITLE_FONT_SIZE : 56}
+                            fontSize={isWaitingPhase ? WAITING_TITLE_FONT_SIZE : 56}
                             color={Color4.create(1, 0.85, 0.2, 1)}
-                            uiTransform={{ margin: { bottom: useCompactPanel ? MOBILE_ANSWERING_TITLE_MARGIN_BOTTOM : 18 } }}
+                            uiTransform={{ margin: { bottom: isWaitingPhase ? WAITING_TITLE_MARGIN_BOTTOM : 18 } }}
                         />
 
                         {round.afkMessage === 'removed' ? (
@@ -511,7 +412,7 @@ export const uiMenu = () => {
                 open state (see report for why this is the chosen simplest-safe behavior). */}
             {socialAgendaOpen && (
                 <UiEntity uiTransform={{ positionType: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                    <SocialAgenda wide={wide} compactUi={compactUi} />
+                    <SocialAgenda wide={wide} compactUi={compact} />
                 </UiEntity>
             )}
         </ScreenInsetArea>
@@ -549,9 +450,8 @@ const JoinedGameplay = () => {
     const { phase, isPending, activeParticipantCount, question, selectedOption, secondsLeft, isRevealing, reveal } =
         roundManager.getSnapshot()
     const wide = getUiScale() >= WIDE_MIN_SCALE
-    // Same isMobile()-OR'd condition as uiMenu's own compactAnswering/compactWaiting - see their doc comments.
-    const compactAnswering = (isMobile() || !wide) && phase === 'answering'
-    const compactWaiting = (isMobile() || !wide) && phase === 'waiting'
+    // Same isMobile()-OR'd signal as uiMenu's own `compact` - see its doc comment.
+    const compact = isMobile() || !wide
 
     if (isPending) {
         return (
@@ -572,15 +472,15 @@ const JoinedGameplay = () => {
             <UiEntity uiTransform={COLUMN_CENTERED}>
                 <Label
                     value="WAITING FOR ANOTHER PLAYER..."
-                    fontSize={compactWaiting ? MOBILE_WAITING_TEXT_FONT_SIZE : 32}
+                    fontSize={WAITING_TEXT_FONT_SIZE}
                     textAlign="middle-center"
                     textWrap="wrap"
                     color={Color4.White()}
-                    uiTransform={{ width: '100%', margin: { bottom: compactWaiting ? MOBILE_WAITING_TEXT_MARGIN_BOTTOM : 16 } }}
+                    uiTransform={{ width: '100%', margin: { bottom: WAITING_TEXT_MARGIN_BOTTOM } }}
                 />
                 <Label
                     value={`${activeParticipantCount} / ${MIN_PLAYERS_REQUIRED}`}
-                    fontSize={compactWaiting ? MOBILE_WAITING_COUNT_FONT_SIZE : 24}
+                    fontSize={WAITING_COUNT_FONT_SIZE}
                     color={MUTED}
                 />
             </UiEntity>
@@ -596,11 +496,11 @@ const JoinedGameplay = () => {
         <UiEntity uiTransform={COLUMN_CENTERED}>
             <Label
                 value={activeQuestion.question}
-                fontSize={compactAnswering ? MOBILE_ANSWERING_QUESTION_FONT_SIZE : 32}
+                fontSize={compact ? ANSWERING_QUESTION_FONT_SIZE_COMPACT : ANSWERING_QUESTION_FONT_SIZE_WIDE}
                 textAlign="middle-center"
                 textWrap="wrap"
                 color={Color4.White()}
-                uiTransform={{ width: '100%', margin: { bottom: compactAnswering ? MOBILE_ANSWERING_QUESTION_MARGIN_BOTTOM : 28 } }}
+                uiTransform={{ width: '100%', margin: { bottom: compact ? ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT : ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE } }}
             />
 
             {phase === 'answering' ? (
@@ -608,9 +508,9 @@ const JoinedGameplay = () => {
                     {/* Countdown: visible but kept small so it stays secondary to the question/buttons */}
                     <Label
                         value={`${secondsLeft}s`}
-                        fontSize={compactAnswering ? MOBILE_ANSWERING_TIMER_FONT_SIZE : 24}
+                        fontSize={compact ? ANSWERING_TIMER_FONT_SIZE_COMPACT : ANSWERING_TIMER_FONT_SIZE_WIDE}
                         color={MUTED}
-                        uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_TIMER_MARGIN_BOTTOM : 28 } }}
+                        uiTransform={{ margin: { bottom: compact ? ANSWERING_TIMER_MARGIN_BOTTOM_COMPACT : ANSWERING_TIMER_MARGIN_BOTTOM_WIDE } }}
                     />
 
                     {selectedOption === null ? (
@@ -618,24 +518,24 @@ const JoinedGameplay = () => {
                             <Button
                                 value={activeQuestion.optionA}
                                 variant="primary"
-                                fontSize={compactAnswering ? mobileAnswerFontSize(activeQuestion.optionA) : 30}
+                                fontSize={answerFontSize(activeQuestion.optionA, compact)}
                                 textWrap="wrap"
                                 uiTransform={
-                                    compactAnswering
-                                        ? { width: MOBILE_ANSWER_BUTTON_WIDTH, height: MOBILE_ANSWER_BUTTON_HEIGHT, margin: { right: MOBILE_ANSWER_BUTTON_GAP } }
-                                        : { width: 260, height: 100, margin: { right: 16 } }
+                                    compact
+                                        ? { width: ANSWER_BUTTON_WIDTH_COMPACT, height: ANSWER_BUTTON_HEIGHT_COMPACT, margin: { right: ANSWER_BUTTON_GAP_COMPACT } }
+                                        : { width: ANSWER_BUTTON_WIDTH_WIDE, height: ANSWER_BUTTON_HEIGHT_WIDE, margin: { right: ANSWER_BUTTON_GAP_WIDE } }
                                 }
                                 onMouseDown={() => roundManager.selectOption('A')}
                             />
                             <Button
                                 value={activeQuestion.optionB}
                                 variant="primary"
-                                fontSize={compactAnswering ? mobileAnswerFontSize(activeQuestion.optionB) : 30}
+                                fontSize={answerFontSize(activeQuestion.optionB, compact)}
                                 textWrap="wrap"
                                 uiTransform={
-                                    compactAnswering
-                                        ? { width: MOBILE_ANSWER_BUTTON_WIDTH, height: MOBILE_ANSWER_BUTTON_HEIGHT, margin: { left: MOBILE_ANSWER_BUTTON_GAP } }
-                                        : { width: 260, height: 100, margin: { left: 16 } }
+                                    compact
+                                        ? { width: ANSWER_BUTTON_WIDTH_COMPACT, height: ANSWER_BUTTON_HEIGHT_COMPACT, margin: { left: ANSWER_BUTTON_GAP_COMPACT } }
+                                        : { width: ANSWER_BUTTON_WIDTH_WIDE, height: ANSWER_BUTTON_HEIGHT_WIDE, margin: { left: ANSWER_BUTTON_GAP_WIDE } }
                                 }
                                 onMouseDown={() => roundManager.selectOption('B')}
                             />
@@ -644,17 +544,17 @@ const JoinedGameplay = () => {
                         <UiEntity uiTransform={COLUMN_CENTERED}>
                             <Label
                                 value="ANSWER LOCKED"
-                                fontSize={compactAnswering ? MOBILE_ANSWERING_LOCKED_LABEL_FONT_SIZE : 32}
+                                fontSize={compact ? ANSWERING_LOCKED_LABEL_FONT_SIZE_COMPACT : ANSWERING_LOCKED_LABEL_FONT_SIZE_WIDE}
                                 color={Color4.create(0.6, 1, 0.6, 1)}
-                                uiTransform={{ margin: { bottom: compactAnswering ? MOBILE_ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM : 12 } }}
+                                uiTransform={{ margin: { bottom: compact ? ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_COMPACT : ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_WIDE } }}
                             />
                             <Label
                                 value={selectedLabel as string}
-                                fontSize={compactAnswering ? mobileAnswerFontSize(selectedLabel as string) : 48}
+                                fontSize={answerFontSize(selectedLabel as string, compact)}
                                 textAlign="middle-center"
                                 textWrap="wrap"
                                 color={Color4.White()}
-                                uiTransform={compactAnswering ? { width: '100%' } : undefined}
+                                uiTransform={{ width: '100%' }}
                             />
                         </UiEntity>
                     )}
@@ -856,141 +756,33 @@ const ResultColumn = ({
 
 /**
  * Persistent social status bar - visible anywhere in the scene, regardless of Quest
- * Zone/join/round state. Consumes connectionsManager's read API only; no relationship
- * logic is reconstructed here. Collapsed by default; toggled via a normal click/touch
- * target (no hover dependence, per mobile requirements).
+ * Zone/join/round state, except during ANSWERING (see uiMenu). Consumes
+ * connectionsManager's read API only; no relationship logic is reconstructed here.
+ * Single unconditional compact pill on every platform - same structure/text/
+ * behavior everywhere, `wide` only nudges fontSize/padding. A tap always opens the
+ * Social Agenda overlay directly; there is no expanded inline panel anymore. The
+ * whole pill is the tap target (generous padding, not just the text), and the
+ * ANSWERING guard below is defense in depth - in practice this pill isn't even
+ * rendered during ANSWERING (see uiMenu's `round.phase !== 'answering'` gate).
  */
-const SocialHud = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }) => {
+const SocialHud = ({ wide }: { wide: boolean }) => {
     const total = getTotalConnections()
-
-    // Mobile/compact: always the compact pill, regardless of socialHudExpanded
-    // (that module flag stays fully meaningful for desktop only, below) - a tap
-    // opens the Social Agenda modal directly instead of expanding an inline
-    // panel downward over the gameplay area. Guarded the same way desktop's own
-    // VIEW ALL CONNECTIONS button already is, for parity (in practice this
-    // pill isn't even rendered during ANSWERING - see hideSocialHudMobile in
-    // uiMenu - so this is defense in depth, not the primary guard).
-    if (compactUi) {
-        return (
-            <UiEntity
-                uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 10, bottom: 10, left: 14, right: 14 } }}
-                uiBackground={{ color: PANEL_BACKGROUND }}
-                onMouseDown={() => {
-                    if (roundManager.getSnapshot().phase === 'answering') return
-                    socialAgendaPage = 0
-                    socialAgendaOpen = true
-                }}
-            >
-                <Label value={`CONNECTIONS · ${total}`} fontSize={16} color={Color4.White()} />
-            </UiEntity>
-        )
-    }
-
-    if (!socialHudExpanded) {
-        // The whole pill is the tap target (generous padding, not just the arrow glyph) -
-        // onMouseDown lives on this same outer row that carries the background, so the
-        // entire visible rectangle is one coherent button, not just the "▼" character.
-        return (
-            <UiEntity
-                uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 12, bottom: 12, left: 16, right: 16 } }}
-                uiBackground={{ color: PANEL_BACKGROUND }}
-                onMouseDown={() => {
-                    socialHudExpanded = true
-                }}
-            >
-                <Label value={`CONNECTIONS  ${total}`} fontSize={20} color={Color4.White()} uiTransform={{ margin: { right: 8 } }} />
-                <Label value="▼" fontSize={18} color={Color4.White()} />
-            </UiEntity>
-        )
-    }
-
-    // Questmate numbering is presentation-only and scoped to this single render of the
-    // recent list - it never substitutes for the real userId identity.
-    const recentUserIds = getRecentConnections()
-    let unresolvedCount = 0
-    const recentLabels = recentUserIds.map((userId) => {
-        const cachedName = getDisplayNameFor(userId)
-        if (cachedName) return cachedName
-        unresolvedCount += 1
-        return `${QUESTMATE_FALLBACK} ${unresolvedCount}`
-    })
 
     return (
         <UiEntity
-            uiTransform={{ flexDirection: 'column', width: wide ? HUD_EXPANDED_WIDTH_WIDE : HUD_EXPANDED_WIDTH_COMPACT }}
+            uiTransform={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                padding: wide ? { top: 12, bottom: 12, left: 16, right: 16 } : { top: 10, bottom: 10, left: 14, right: 14 }
+            }}
             uiBackground={{ color: PANEL_BACKGROUND }}
+            onMouseDown={() => {
+                if (roundManager.getSnapshot().phase === 'answering') return
+                socialAgendaPage = 0
+                socialAgendaOpen = true
+            }}
         >
-            {/* Header is its own full-width row with its own background and generous padding -
-                the whole bar is the tap target to collapse, not just the "▲" glyph, and it's a
-                sibling of (not a wrapper around) the body below, so a tap on Recent Connections
-                content can never register as a header tap. */}
-            <UiEntity
-                uiTransform={{
-                    width: '100%',
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: { top: 12, bottom: 12, left: 16, right: 16 }
-                }}
-                uiBackground={{ color: PANEL_BACKGROUND }}
-                onMouseDown={() => {
-                    socialHudExpanded = false
-                }}
-            >
-                <Label value="MY SOCIAL QUEST" fontSize={18} color={Color4.create(1, 0.85, 0.2, 1)} />
-                <Label value="▲" fontSize={20} color={Color4.White()} />
-            </UiEntity>
-
-            <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', padding: { top: 16, bottom: 20, left: 20, right: 20 } }}>
-                <Label value="CONNECTIONS" fontSize={14} color={MUTED} uiTransform={{ margin: { bottom: 4 } }} />
-                <Label value={`${total}`} fontSize={28} color={Color4.White()} uiTransform={{ margin: { bottom: 16 } }} />
-
-                {recentLabels.length > 0 && (
-                    <UiEntity uiTransform={{ width: '100%', flexDirection: 'column' }}>
-                        <Label value="RECENT CONNECTIONS" fontSize={14} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
-                        {recentUserIds.map((userId, index) => {
-                            // Friendship level is derived here purely from the existing ConnectionRecord's
-                            // roundsTogether via friendshipManager's own pure lookup - no new state, no
-                            // threshold logic duplicated in the UI. roundsTogether defaults to 0 (level null,
-                            // line omitted) only in the defensive case getConnection somehow returns null,
-                            // which shouldn't happen for a userId that's already in the recent list.
-                            const roundsTogether = getConnection(userId)?.roundsTogether ?? 0
-                            const level = getFriendshipLevel(roundsTogether)
-                            return (
-                                <UiEntity key={userId} uiTransform={{ width: '100%', flexDirection: 'column', margin: { bottom: 8 } }}>
-                                    <Label value={recentLabels[index]} fontSize={18} color={Color4.White()} />
-                                    {level !== null && (
-                                        <Label
-                                            value={`✦ ${level} · ${roundsTogether} ROUND${roundsTogether === 1 ? '' : 'S'}`}
-                                            fontSize={14}
-                                            color={Color4.create(0.4, 0.75, 1, 1)}
-                                            textWrap="wrap"
-                                        />
-                                    )}
-                                </UiEntity>
-                            )
-                        })}
-                    </UiEntity>
-                )}
-
-                {/* Opens the full Social Agenda overlay. Guarded the same way ANSWERING already
-                    forces this whole panel collapsed elsewhere: if a question is currently being
-                    answered, pressing this does nothing rather than opening a panel that would
-                    compete with it. Collapses this small panel back to the pill first, since the
-                    Agenda already shows everything it does (and more) in its own larger view. */}
-                <Button
-                    value="VIEW ALL CONNECTIONS"
-                    variant="secondary"
-                    fontSize={16}
-                    uiTransform={{ width: '100%', height: 56, margin: { top: 14 } }}
-                    onMouseDown={() => {
-                        if (roundManager.getSnapshot().phase === 'answering') return
-                        socialHudExpanded = false
-                        socialAgendaPage = 0
-                        socialAgendaOpen = true
-                    }}
-                />
-            </UiEntity>
+            <Label value={`CONNECTIONS · ${total}`} fontSize={wide ? 18 : 16} color={Color4.White()} />
         </UiEntity>
     )
 }
