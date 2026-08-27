@@ -12,6 +12,7 @@ import {
     STORAGE_KEY,
     emptyProfile,
     sanitizeProfile,
+    sanitizeDisplayName,
     normalizeUserId,
     sortedPairKey,
     hasProcessedEventId,
@@ -166,7 +167,14 @@ type ApplyDeltaResult = 'SAVED' | 'ALREADY_PROCESSED' | 'FAILED'
  * which by then already reflects every earlier-queued write for that player that has
  * committed, never a stale snapshot captured before this task was even enqueued.
  */
-async function applyDeltaToPlayer(address: string, otherUserId: string, same: boolean, eventId: string): Promise<ApplyDeltaResult> {
+async function applyDeltaToPlayer(
+    address: string,
+    otherUserId: string,
+    same: boolean,
+    eventId: string,
+    /** The OTHER player's display name, as observed by THIS server right now via getPlayer() - already sanitized (non-empty, trimmed) by the caller, or undefined if unresolved this tick. Never a client-claimed value. */
+    observedDisplayName: string | undefined
+): Promise<ApplyDeltaResult> {
     const baseline = await loadProfile(address)
     if (hasProcessedEventId(baseline, eventId)) return 'ALREADY_PROCESSED' // fast path - never even joins the queue
 
@@ -181,7 +189,11 @@ async function applyDeltaToPlayer(address: string, otherUserId: string, same: bo
         const record: PersistedConnectionRecord = {
             roundsTogether: existing.roundsTogether + 1,
             sameAnswers: existing.sameAnswers + (same ? 1 : 0),
-            differentAnswers: existing.differentAnswers + (same ? 0 : 1)
+            differentAnswers: existing.differentAnswers + (same ? 0 : 1),
+            // Only ever overwritten by a freshly-observed valid name this tick - a
+            // temporarily unresolved observation (undefined) always falls back to
+            // whatever was already stored, never regresses to "no name".
+            lastKnownDisplayName: observedDisplayName ?? existing.lastKnownDisplayName
         }
         // A fresh object tree - current/serverProfiles is never touched unless this commits below.
         const candidate: PersistedSocialQuestProfileV1 = {
@@ -211,14 +223,22 @@ async function applyDeltaToPlayer(address: string, otherUserId: string, same: bo
  * failed side gets a fresh attempt, exactly the natural retry the RESULT scanner
  * already provides every ~1s, with no new retry infrastructure.
  */
-async function processRoundPair(roundId: number, userA: string, userB: string, same: boolean): Promise<void> {
+async function processRoundPair(
+    roundId: number,
+    userA: string,
+    userB: string,
+    same: boolean,
+    /** Names observed by THIS server right now, already sanitized - nameA is A's own name (goes into B's record about A), nameB is B's own name (goes into A's record about B). Never client-claimed. */
+    nameA: string | undefined,
+    nameB: string | undefined
+): Promise<void> {
     const eventId = `${SERVER_SESSION_ID}:${roundId}:${sortedPairKey(userA, userB)}`
     if (processedPairEventsInMemory.has(eventId)) return
 
     try {
         const [resultA, resultB] = await Promise.all([
-            applyDeltaToPlayer(userA, userB, same, eventId),
-            applyDeltaToPlayer(userB, userA, same, eventId)
+            applyDeltaToPlayer(userA, userB, same, eventId, nameB), // A's record ABOUT B stores B's name
+            applyDeltaToPlayer(userB, userA, same, eventId, nameA) // B's record ABOUT A stores A's name
         ])
         const doneA = resultA === 'SAVED' || resultA === 'ALREADY_PROCESSED'
         const doneB = resultB === 'SAVED' || resultB === 'ALREADY_PROCESSED'
@@ -232,6 +252,22 @@ async function processRoundPair(roundId: number, userA: string, userB: string, s
     } catch (err) {
         console.error(`[Persistence][SERVER] Failed to process round ${roundId} pair: ${err instanceof Error ? err.message : String(err)}`)
     }
+}
+
+/**
+ * Resolves the AUTHORITATIVE SERVER's own current observation of `userId`'s
+ * display name - getPlayer() here reads this server's own ECS state
+ * (PlayerIdentityData/AvatarBase, populated by the platform's comms/identity
+ * sync for every connected peer, server included - see the investigation this
+ * is based on), never anything a client explicitly sends. AvatarBase.name can
+ * be an empty string if that component hasn't synced yet even though the
+ * player is otherwise present - sanitizeDisplayName treats that exactly like
+ * "unresolved" (undefined), never as a real name, and this function
+ * deliberately never substitutes an artificial fallback like "Player" -
+ * callers fall back to whatever was already stored instead.
+ */
+function resolveObservedDisplayName(userId: string): string | undefined {
+    return sanitizeDisplayName(getPlayer({ userId })?.name)
 }
 
 /**
@@ -273,7 +309,13 @@ function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
         for (let j = i + 1; j < answers.length; j++) {
             const a = answers[i]
             const b = answers[j]
-            void processRoundPair(state.roundId, normalizeUserId(a.userId), normalizeUserId(b.userId), a.option === b.option)
+            // Resolved from the RAW (non-normalized) userId - PlayerIdentityData.address
+            // is the real, case-preserved address; normalizeUserId's lowercasing is a
+            // persistence-layer-only convention for the Storage key, not what getPlayer()
+            // matches against.
+            const nameA = resolveObservedDisplayName(a.userId)
+            const nameB = resolveObservedDisplayName(b.userId)
+            void processRoundPair(state.roundId, normalizeUserId(a.userId), normalizeUserId(b.userId), a.option === b.option, nameA, nameB)
         }
     }
 }
@@ -416,7 +458,10 @@ export function initPersistenceClient(): void {
                     otherUserId,
                     roundsTogether: record.roundsTogether + (unconfirmed?.roundsTogether ?? 0),
                     sameAnswers: record.sameAnswers + (unconfirmed?.sameAnswers ?? 0),
-                    differentAnswers: record.differentAnswers + (unconfirmed?.differentAnswers ?? 0)
+                    differentAnswers: record.differentAnswers + (unconfirmed?.differentAnswers ?? 0),
+                    // Carried through as-is - the unconfirmed local reconciliation above is
+                    // purely about round/answer counters, it never observes or affects names.
+                    lastKnownDisplayName: record.lastKnownDisplayName
                 }
             })
             // Any remaining unconfirmedDeltas belong to partners with pending

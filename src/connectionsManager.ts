@@ -12,6 +12,15 @@ export interface ConnectionRecord {
     roundsTogether: number
     sameAnswers: number
     differentAnswers: number
+    /**
+     * Best display name the AUTHORITATIVE SERVER has persisted for this
+     * partner (see persistenceManager.ts/hydrateConnections below) - distinct
+     * from, and lower-priority than, this client's own live displayNameCache:
+     * a currently-observable name (getDisplayNameFor) always wins over this
+     * potentially-older persisted one in the UI. Only ever set via hydration;
+     * live gameplay (recordRound) never touches it.
+     */
+    lastKnownDisplayName?: string
 }
 
 /** Internal record: same as ConnectionRecord plus the bounded per-relationship dedup marker. */
@@ -128,7 +137,13 @@ export function getNewConnectionsFromLastRound(): string[] {
 export function getConnection(otherUserId: string): ConnectionRecord | null {
     const record = connections.get(otherUserId)
     if (!record) return null
-    return { otherUserId: record.otherUserId, roundsTogether: record.roundsTogether, sameAnswers: record.sameAnswers, differentAnswers: record.differentAnswers }
+    return {
+        otherUserId: record.otherUserId,
+        roundsTogether: record.roundsTogether,
+        sameAnswers: record.sameAnswers,
+        differentAnswers: record.differentAnswers,
+        lastKnownDisplayName: record.lastKnownDisplayName
+    }
 }
 
 export function getAllConnections(): ConnectionRecord[] {
@@ -136,7 +151,8 @@ export function getAllConnections(): ConnectionRecord[] {
         otherUserId: record.otherUserId,
         roundsTogether: record.roundsTogether,
         sameAnswers: record.sameAnswers,
-        differentAnswers: record.differentAnswers
+        differentAnswers: record.differentAnswers,
+        lastKnownDisplayName: record.lastKnownDisplayName
     }))
 }
 
@@ -212,6 +228,11 @@ export function hydrateConnections(records: ConnectionRecord[], replaceInstead: 
                 existing.sameAnswers += record.sameAnswers
                 existing.differentAnswers += record.differentAnswers
             }
+            // Name hydration is independent of the counter reconciliation above (replace
+            // vs add) - either way, a persisted name simply wins if present, otherwise
+            // whatever this session already had (almost always nothing yet) is kept.
+            // Never triggers a celebration or touches Friendship - purely a name field.
+            existing.lastKnownDisplayName = record.lastKnownDisplayName ?? existing.lastKnownDisplayName
             results.push({ otherUserId: record.otherUserId, roundsTogether: existing.roundsTogether, wasMerge: true })
         } else {
             connections.set(record.otherUserId, {
@@ -219,6 +240,7 @@ export function hydrateConnections(records: ConnectionRecord[], replaceInstead: 
                 roundsTogether: record.roundsTogether,
                 sameAnswers: record.sameAnswers,
                 differentAnswers: record.differentAnswers,
+                lastKnownDisplayName: record.lastKnownDisplayName,
                 lastProcessedRoundId: -1
             })
             results.push({ otherUserId: record.otherUserId, roundsTogether: record.roundsTogether, wasMerge: false })

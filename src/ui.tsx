@@ -958,7 +958,9 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             uiTransform={{ margin: { bottom: 14 } }}
                         />
                         {pageEntries.map((connection) => {
-                            const name = getDisplayNameFor(connection.otherUserId) ?? QUESTMATE_FALLBACK
+                            // Priority: a currently-observable name always wins over a persisted
+                            // one (which may be stale), which in turn wins over the generic fallback.
+                            const name = getDisplayNameFor(connection.otherUserId) ?? connection.lastKnownDisplayName ?? QUESTMATE_FALLBACK
                             const level = getFriendshipLevel(connection.roundsTogether)
                             return (
                                 <UiEntity key={connection.otherUserId} uiTransform={{ width: '100%', flexDirection: 'column', margin: { bottom: 12 } }}>
