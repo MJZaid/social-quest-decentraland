@@ -24,6 +24,8 @@ import {
     hasProcessedSocialPointsEventId,
     pushProcessedSocialPointsEventId
 } from './persistenceSchema'
+import { enqueueWrite } from './storageWriteQueue'
+import { scheduleLeaderboardSync, retryPendingLeaderboardSyncs, hydrateLeaderboardCache } from './leaderboardManager'
 
 // -----------------------------------------------------------------------
 // PERSISTENCE v1 - side channel only.
@@ -123,34 +125,6 @@ async function saveProfile(address: string, profile: PersistedSocialQuestProfile
         )
         return false
     }
-}
-
-/**
- * Global write queue: guarantees this server process never has more than one
- * Storage.player.set() in flight at a time, no matter how many players/pairs
- * a single RESULT scan produces. Needed because the local preview's Storage
- * mock (sdk-commands' server-storage.json) does a non-atomic, whole-file
- * read-modify-write per call with no locking - two concurrent set() calls can
- * read the same stale snapshot and the second's write silently clobbers the
- * first's. Chaining every write through one FIFO promise tail serializes them
- * app-side regardless of what the storage backend itself does, so the same
- * protection also holds against production's real backend without needing to
- * assume anything about it.
- *
- * A rejected/failed task can never wedge the queue for later ones: the tail
- * is always advanced via a handler that resolves either way. In practice
- * saveProfile() never throws (it already catches internally and resolves to
- * false), so this is defense in depth, not the primary safety net.
- */
-let saveQueueTail: Promise<unknown> = Promise.resolve()
-
-function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
-    const runTask = saveQueueTail.then(task)
-    saveQueueTail = runTask.then(
-        () => undefined,
-        () => undefined
-    )
-    return runTask
 }
 
 /** Outcome of one applyDeltaToPlayer() attempt - lets the caller (processRoundPair) tell a durable no-op apart from a fresh commit or a failure that should be retried on a later RESULT tick. */
@@ -400,8 +374,18 @@ async function saveSocialPointsProfile(address: string, profile: PersistedSocial
  * time. On failure, nothing about this player's state changes at all - not
  * validRounds, not recentProcessedEventIds - so the next RESULT tick's
  * rescan is free to retry this exact eventId from scratch.
+ *
+ * On a successful SAVE (and ONLY then - never on ALREADY_PROCESSED, never
+ * before the player-scoped write itself has confirmed), schedules a
+ * leaderboard mirror sync with the freshly-committed ABSOLUTE validRounds -
+ * never a delta - so the scene-scoped index converges on the same truth
+ * regardless of how many times or how out-of-order this ends up syncing.
+ * Fire-and-forget: scheduleLeaderboardSync() never throws and its own
+ * eventual Storage.set is a separate, later entry in the same shared queue -
+ * never awaited here, so it can never block or fail this player's Social
+ * Points result.
  */
-async function applySocialPointsEvent(address: string, eventId: string): Promise<ApplyDeltaResult> {
+async function applySocialPointsEvent(address: string, eventId: string, observedDisplayName: string | undefined): Promise<ApplyDeltaResult> {
     const baseline = await loadSocialPointsProfile(address)
     if (hasProcessedSocialPointsEventId(baseline, eventId)) {
         return 'ALREADY_PROCESSED' // fast path - never even joins the queue
@@ -429,19 +413,20 @@ async function applySocialPointsEvent(address: string, eventId: string): Promise
         }
 
         socialPointsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+        scheduleLeaderboardSync(address, candidate.validRounds, observedDisplayName)
         return 'SAVED'
     })
 }
 
 /** One player's +1 validRound event for `roundId` - dedup, apply, and log-only-on-non-success, mirroring processRoundPair's own shape for a single subject instead of a pair. */
-async function processSocialPointsEvent(roundId: number, address: string): Promise<void> {
+async function processSocialPointsEvent(roundId: number, address: string, observedDisplayName: string | undefined): Promise<void> {
     const eventId = `${SERVER_SESSION_ID}:${roundId}:${address}`
     if (processedSocialPointsEventsInMemory.has(eventId)) {
         return
     }
 
     try {
-        const result = await applySocialPointsEvent(address, eventId)
+        const result = await applySocialPointsEvent(address, eventId, observedDisplayName)
         if (result === 'SAVED' || result === 'ALREADY_PROCESSED') {
             processedSocialPointsEventsInMemory.add(eventId)
         } else {
@@ -479,7 +464,11 @@ function scanCurrentRoundForSocialPoints(state: RoundStateValue): void {
     if (validAnswerers.length < 2) return // needs at least 2 valid answerers this round to count for anyone
 
     for (const userId of validAnswerers) {
-        void processSocialPointsEvent(state.roundId, normalizeUserId(userId))
+        // Resolved from the RAW (non-normalized) userId, before normalizeUserId -
+        // same reasoning as scanCurrentRoundForValidPairs above: getPlayer() matches
+        // against the real, case-preserved address, not the persistence-layer key.
+        const observedDisplayName = resolveObservedDisplayName(userId)
+        void processSocialPointsEvent(state.roundId, normalizeUserId(userId), observedDisplayName)
     }
 }
 
@@ -492,6 +481,12 @@ export function initPersistenceServer(): void {
     // same call a late-joining client already makes today. Read-only in
     // practice: this server never calls writeRoundState().
     startRoundStateSync()
+
+    // Fire-and-forget: never blocks server boot, gameplay, or Social Points -
+    // see hydrateLeaderboardCache()'s own doc comment. While this is still
+    // running, scheduleLeaderboardSync() (called from real Social Points
+    // saves that can happen during this same window) only buffers in memory.
+    void hydrateLeaderboardCache()
 
     persistenceRoom.onMessage('requestProfile', async (_data, context) => {
         if (!context) {
@@ -517,6 +512,11 @@ export function initPersistenceServer(): void {
             const state = getRoundState()
             scanCurrentRoundForValidPairs(state)
             scanCurrentRoundForSocialPoints(state)
+            // Unconditional - NOT gated on RESULT phase like the two scans above.
+            // A pending leaderboard mirror sync can still need retrying long after
+            // the RESULT that produced it has ended; see retryPendingLeaderboardSyncs()'s
+            // own doc comment.
+            retryPendingLeaderboardSyncs()
         }, 1000)
     }
 }
