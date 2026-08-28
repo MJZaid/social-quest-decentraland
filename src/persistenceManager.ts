@@ -16,7 +16,13 @@ import {
     normalizeUserId,
     sortedPairKey,
     hasProcessedEventId,
-    pushProcessedEventId
+    pushProcessedEventId,
+    PersistedSocialPointsProfileV1,
+    SOCIAL_POINTS_STORAGE_KEY,
+    emptySocialPointsProfile,
+    sanitizeSocialPointsProfile,
+    hasProcessedSocialPointsEventId,
+    pushProcessedSocialPointsEventId
 } from './persistenceSchema'
 
 // -----------------------------------------------------------------------
@@ -320,6 +326,163 @@ function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SOCIAL POINTS (Phase 1) - a fully independent domain from Connections above.
+// Separate Storage key, separate in-memory canonical map, separate dedupe
+// list and in-memory processed-set. The ONE thing deliberately shared with
+// Connections is the write queue (enqueueWrite/saveQueueTail, defined above)
+// - every Storage.player.set() in this file, for either domain, runs through
+// that same FIFO, so the two domains can never have overlapping writes in
+// flight. Nothing else about Connections is read, written, or assumed here.
+// ---------------------------------------------------------------------------
+
+/** In-memory canonical Social Points profile per player, same role/guarantees as serverProfiles above: only ever updated after a queued Storage.player.set() confirms success. */
+const socialPointsProfiles = new Map<string, PersistedSocialPointsProfileV1>()
+/** Addresses currently mid-load, mirrors loadingInFlight above but for this separate domain. */
+const socialPointsLoadingInFlight = new Map<string, Promise<PersistedSocialPointsProfileV1>>()
+/** Fast-path in-memory record of per-player roundEventIds already handled THIS server process - mirrors processedPairEventsInMemory above, own Set. */
+const processedSocialPointsEventsInMemory = new Set<string>()
+
+async function loadSocialPointsProfile(address: string): Promise<PersistedSocialPointsProfileV1> {
+    const existing = socialPointsProfiles.get(address)
+    if (existing) return existing
+
+    const inFlight = socialPointsLoadingInFlight.get(address)
+    if (inFlight) return inFlight
+
+    const promise = (async () => {
+        try {
+            const raw = await Storage.player.get<unknown>(address, SOCIAL_POINTS_STORAGE_KEY, { fresh: true })
+            const profile = raw === null ? emptySocialPointsProfile() : sanitizeSocialPointsProfile(raw)
+            socialPointsProfiles.set(address, profile)
+            return profile
+        } catch (err) {
+            console.error(
+                `[SocialPoints][SERVER] Storage.player.get failed - continuing with an empty profile, session-only for this player: ${
+                    err instanceof Error ? err.message : String(err)
+                }`
+            )
+            const profile = emptySocialPointsProfile()
+            socialPointsProfiles.set(address, profile)
+            return profile
+        } finally {
+            socialPointsLoadingInFlight.delete(address)
+        }
+    })()
+
+    socialPointsLoadingInFlight.set(address, promise)
+    return promise
+}
+
+async function saveSocialPointsProfile(address: string, profile: PersistedSocialPointsProfileV1): Promise<boolean> {
+    try {
+        const ok = await Storage.player.set(address, SOCIAL_POINTS_STORAGE_KEY, profile)
+        if (!ok) {
+            console.error('[SocialPoints][SERVER] Storage.player.set returned false - this event was not persisted, but gameplay is unaffected')
+        }
+        return ok
+    } catch (err) {
+        console.error(
+            `[SocialPoints][SERVER] Storage.player.set threw - this event was not persisted, but gameplay is unaffected: ${
+                err instanceof Error ? err.message : String(err)
+            }`
+        )
+        return false
+    }
+}
+
+/**
+ * Applies one round's +1 validRound to a single player, as a queued
+ * read-current -> build candidate -> commit-only-on-success transaction -
+ * identical shape to applyDeltaToPlayer above, own domain. Runs inside the
+ * SAME enqueueWrite queue Connections uses (not a second one), so a Social
+ * Points write and a Connections write can never be in flight at the same
+ * time. On failure, nothing about this player's state changes at all - not
+ * validRounds, not recentProcessedEventIds - so the next RESULT tick's
+ * rescan is free to retry this exact eventId from scratch.
+ */
+async function applySocialPointsEvent(address: string, eventId: string): Promise<ApplyDeltaResult> {
+    const baseline = await loadSocialPointsProfile(address)
+    if (hasProcessedSocialPointsEventId(baseline, eventId)) {
+        return 'ALREADY_PROCESSED' // fast path - never even joins the queue
+    }
+
+    return enqueueWrite(async (): Promise<ApplyDeltaResult> => {
+        // Re-check against the CURRENT canonical profile, not `baseline` - mirrors
+        // applyDeltaToPlayer's own reasoning: another queued write for this same
+        // player (Social Points or Connections) may have already run its turn.
+        const current = socialPointsProfiles.get(address) ?? baseline
+        if (hasProcessedSocialPointsEventId(current, eventId)) {
+            return 'ALREADY_PROCESSED'
+        }
+
+        const candidate: PersistedSocialPointsProfileV1 = {
+            version: current.version,
+            validRounds: current.validRounds + 1,
+            recentProcessedEventIds: [...current.recentProcessedEventIds]
+        }
+        pushProcessedSocialPointsEventId(candidate, eventId)
+
+        const ok = await saveSocialPointsProfile(address, candidate)
+        if (!ok) {
+            return 'FAILED'
+        }
+
+        socialPointsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+        return 'SAVED'
+    })
+}
+
+/** One player's +1 validRound event for `roundId` - dedup, apply, and log-only-on-non-success, mirroring processRoundPair's own shape for a single subject instead of a pair. */
+async function processSocialPointsEvent(roundId: number, address: string): Promise<void> {
+    const eventId = `${SERVER_SESSION_ID}:${roundId}:${address}`
+    if (processedSocialPointsEventsInMemory.has(eventId)) {
+        return
+    }
+
+    try {
+        const result = await applySocialPointsEvent(address, eventId)
+        if (result === 'SAVED' || result === 'ALREADY_PROCESSED') {
+            processedSocialPointsEventsInMemory.add(eventId)
+        } else {
+            console.error(`[SocialPoints][SERVER] ${address} (round ${roundId}) not persisted yet - will retry on a later RESULT tick`)
+        }
+    } catch (err) {
+        console.error(`[SocialPoints][SERVER] Failed to process round ${roundId} for ${address}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+}
+
+/** This round's distinct valid answerers, deduped by userId - defensive only: each client has exactly one PlayerAnswer entity (see networkPlayerAnswer.ts), so a duplicate should never occur, but this never assumes it. */
+function getValidRoundAnswerers(roundId: number): string[] {
+    const userIds = new Set<string>()
+    for (const answer of getAnswersForRound(roundId)) {
+        if (answer.option === AnswerOption.NO_ANSWER) continue
+        userIds.add(answer.userId)
+    }
+    return [...userIds]
+}
+
+/**
+ * Scans the CURRENT round's live synced answers for Social Points - a flat
+ * loop per PLAYER, deliberately not the pair loop scanCurrentRoundForValidPairs
+ * uses (that function is untouched; this is a fully separate scan of the same
+ * underlying data). A round only ever awards +1 validRound per player, and
+ * only if at least 2 players answered validly this round - a single answerer
+ * with nobody else responding gets nothing, matching the product rule exactly.
+ * Re-scanning an already-applied round is a cheap no-op via the same
+ * eventId/dedupe discipline as Connections.
+ */
+function scanCurrentRoundForSocialPoints(state: RoundStateValue): void {
+    if (state.phase !== SharedPhase.RESULT) return
+
+    const validAnswerers = getValidRoundAnswerers(state.roundId)
+    if (validAnswerers.length < 2) return // needs at least 2 valid answerers this round to count for anyone
+
+    for (const userId of validAnswerers) {
+        void processSocialPointsEvent(state.roundId, normalizeUserId(userId))
+    }
+}
+
 let serverTickIntervalId: number | null = null
 
 export function initPersistenceServer(): void {
@@ -350,7 +513,11 @@ export function initPersistenceServer(): void {
     })
 
     if (serverTickIntervalId === null) {
-        serverTickIntervalId = setInterval(() => scanCurrentRoundForValidPairs(getRoundState()), 1000)
+        serverTickIntervalId = setInterval(() => {
+            const state = getRoundState()
+            scanCurrentRoundForValidPairs(state)
+            scanCurrentRoundForSocialPoints(state)
+        }, 1000)
     }
 }
 

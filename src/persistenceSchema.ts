@@ -130,3 +130,96 @@ export function pushProcessedEventId(profile: PersistedSocialQuestProfileV1, eve
 export function hasProcessedEventId(profile: PersistedSocialQuestProfileV1, eventId: string): boolean {
     return profile.recentProcessedEventIds.includes(eventId)
 }
+
+// -----------------------------------------------------------------------
+// SOCIAL POINTS (Phase 1) - a fully independent persisted domain from the
+// Connections profile above. Separate Storage key, separate schema, separate
+// dedupe list - by design, so neither can ever affect or corrupt the other.
+// The only thing the two domains share is the write queue (persistenceManager.ts),
+// not any data shape here.
+// -----------------------------------------------------------------------
+
+/**
+ * Data shape persisted via Storage.player for Social Quest's Social Points
+ * progress. Deliberately minimal: a single counter of valid rounds and its
+ * own dedupe list. socialPoints and questProgress are NEVER stored - both
+ * are pure derivations of validRounds (see getSocialPointsSnapshot below),
+ * so there is exactly one number that can ever be wrong, not three that
+ * could drift apart from each other.
+ */
+export interface PersistedSocialPointsProfileV1 {
+    version: 1
+    validRounds: number
+    /** Bounded circular buffer of already-applied per-player roundEventIds - see persistenceManager.ts. Never a full history log, and never the same list Connections uses. */
+    recentProcessedEventIds: string[]
+}
+
+export const SOCIAL_POINTS_SCHEMA_VERSION = 1
+export const SOCIAL_POINTS_STORAGE_KEY = 'socialQuestPointsProfileV1'
+/** Same bound as Connections' own MAX_RECENT_EVENT_IDS, kept as an independent constant on purpose - the two domains' lists are unrelated and shouldn't share a knob just because the number happens to match today. */
+export const MAX_RECENT_SOCIAL_POINTS_EVENT_IDS = 100
+
+export function emptySocialPointsProfile(): PersistedSocialPointsProfileV1 {
+    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds: 0, recentProcessedEventIds: [] }
+}
+
+/**
+ * Defensively validates/repairs a value loaded from Storage.player before anything
+ * else touches it - same discipline as sanitizeProfile above, kept fully separate.
+ * Never throws; any unrecognized shape, wrong version, or corrupted field falls
+ * back to emptySocialPointsProfile(), never a crash and never unchecked data
+ * reaching gameplay-facing code.
+ */
+export function sanitizeSocialPointsProfile(raw: unknown): PersistedSocialPointsProfileV1 {
+    if (!raw || typeof raw !== 'object') return emptySocialPointsProfile()
+    const value = raw as Record<string, unknown>
+    if (value.version !== SOCIAL_POINTS_SCHEMA_VERSION) return emptySocialPointsProfile()
+
+    const validRounds = isFiniteNonNegativeInt(value.validRounds) ? value.validRounds : 0
+
+    let recentProcessedEventIds: string[] = []
+    if (Array.isArray(value.recentProcessedEventIds)) {
+        recentProcessedEventIds = value.recentProcessedEventIds
+            .filter((id): id is string => typeof id === 'string')
+            .slice(-MAX_RECENT_SOCIAL_POINTS_EVENT_IDS)
+    }
+
+    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds, recentProcessedEventIds }
+}
+
+/** Appends an event id, keeping the buffer bounded - a circular window via slice, never a full unbounded log. Own list, own function - never Connections' pushProcessedEventId. */
+export function pushProcessedSocialPointsEventId(profile: PersistedSocialPointsProfileV1, eventId: string): void {
+    profile.recentProcessedEventIds.push(eventId)
+    if (profile.recentProcessedEventIds.length > MAX_RECENT_SOCIAL_POINTS_EVENT_IDS) {
+        profile.recentProcessedEventIds = profile.recentProcessedEventIds.slice(-MAX_RECENT_SOCIAL_POINTS_EVENT_IDS)
+    }
+}
+
+export function hasProcessedSocialPointsEventId(profile: PersistedSocialPointsProfileV1, eventId: string): boolean {
+    return profile.recentProcessedEventIds.includes(eventId)
+}
+
+/** Pure, UI-facing snapshot derived from validRounds alone - never persisted itself, so leaderboard/UI code (later phases) always reads the same single definition of these numbers. */
+export interface SocialPointsSnapshot {
+    validRounds: number
+    socialPoints: number
+    questProgress: number
+}
+
+/** How many validRounds make up one Social Points tier, and how many points that tier is worth - see getSocialPoints/getQuestProgress. */
+const VALID_ROUNDS_PER_TIER = 5
+const SOCIAL_POINTS_PER_TIER = 100
+
+/** floor(validRounds / 5) * 100 - the only place this formula is written. */
+export function getSocialPoints(validRounds: number): number {
+    return Math.floor(validRounds / VALID_ROUNDS_PER_TIER) * SOCIAL_POINTS_PER_TIER
+}
+
+/** validRounds % 5 - progress toward the next tier. */
+export function getQuestProgress(validRounds: number): number {
+    return validRounds % VALID_ROUNDS_PER_TIER
+}
+
+export function getSocialPointsSnapshot(validRounds: number): SocialPointsSnapshot {
+    return { validRounds, socialPoints: getSocialPoints(validRounds), questProgress: getQuestProgress(validRounds) }
+}
