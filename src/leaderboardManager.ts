@@ -250,3 +250,21 @@ export function hydrateLeaderboardCache(): Promise<void> {
 export function getLeaderboardEntryForTesting(normalizedUserId: string): PersistedLeaderboardEntryV1 | undefined {
     return leaderboardEntries.get(normalizedUserId)
 }
+
+/**
+ * Read-only snapshot of every confirmed cache entry, for callers (the
+ * ranking layer) that must never hold a reference to the live, mutable
+ * Map or its stored objects. A new array AND a shallow copy of each entry
+ * every call - the schema is flat/primitives-only (see
+ * PersistedLeaderboardEntryV1), so a shallow copy is a real, independent
+ * object: a caller mutating a field on a returned entry can never reach
+ * back into leaderboardEntries' own canonical object.
+ */
+export function getLeaderboardCacheSnapshot(): PersistedLeaderboardEntryV1[] {
+    return [...leaderboardEntries.values()].map((entry) => ({ ...entry }))
+}
+
+/** True only once a full hydration paging sweep has completed cleanly - see hydrationFullyLoaded's own doc comment above. Callers must treat `false` as "the index may be incomplete," never partial-but-good-enough. */
+export function isLeaderboardFullyLoaded(): boolean {
+    return hydrationFullyLoaded
+}
