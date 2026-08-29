@@ -12,6 +12,8 @@ import {
     PresentedNewConnectionCelebration,
     PresentedFriendshipCelebration
 } from './socialCelebrationQueue'
+import { requestLeaderboard, getLatestLeaderboardResponse, LeaderboardResponse } from './leaderboardNetwork'
+import { LeaderboardRankedEntry } from './leaderboardRanking'
 
 /** Virtual design resolution this scene's UI is authored against - kept in sync with the setUiRenderer call below. */
 const VIRTUAL_WIDTH = 1920
@@ -38,6 +40,9 @@ const QUESTMATE_FALLBACK = 'Questmate'
 let socialAgendaOpen = false
 /** Current 0-based Agenda page - reset to 0 every time the Agenda is opened, so a re-open never resumes on a stale page. */
 let socialAgendaPage = 0
+
+/** Whether the Leaderboard overlay is open - same role/lifecycle as socialAgendaOpen (presentation-only, local, never synced), mutually exclusive with it since both are centered overlays occupying the same screen region. Default: closed. */
+let leaderboardOpen = false
 
 /**
  * Below this render scale, panels declared at their normal size (the 280-wide HUD
@@ -126,6 +131,23 @@ const MOBILE_AGENDA_MAX_HEIGHT = '70%'
  * "reliability over sophistication" guidance for this feature.
  */
 const AGENDA_ROWS_PER_PAGE = 6
+
+/**
+ * How many ranked players the Leaderboard overlay requests/shows - fixed,
+ * no scroll/pagination in this first version (Phase 2B-3). A deliberately
+ * small, controllable number; a later phase can raise it once the panel
+ * needs to show more.
+ */
+const LEADERBOARD_TOP_N = 5
+
+/** Leaderboard overlay panel width, same wide/compact tiering signal as every other panel in this file. Deliberately smaller than the Social Agenda panel - its content is a short, fixed-length list (LEADERBOARD_TOP_N rows + at most one extra "Your Rank" row), never a paginated arbitrary-length one. */
+const LEADERBOARD_WIDTH_WIDE = 480
+const LEADERBOARD_WIDTH_COMPACT = 380
+
+/** Fixed per-row height, same reliability reasoning as REVEAL_NAME_ROW_HEIGHT and the Agenda's name rows above - a row's height is never left to auto-measure from its Label. */
+const LEADERBOARD_ROW_HEIGHT_WIDE = 32
+const LEADERBOARD_ROW_HEIGHT_COMPACT = 26
+const LEADERBOARD_ROW_GAP = 6
 
 /**
  * Maximum names shown per RESULT option column before collapsing the rest into
@@ -326,6 +348,11 @@ export const uiMenu = () => {
     if (socialAgendaOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
         socialAgendaOpen = false
     }
+    // Same auto-close rule as Social Agenda above, same reasoning - a centered
+    // overlay must never be left open over gameplay that needs attention.
+    if (leaderboardOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
+        leaderboardOpen = false
+    }
 
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
@@ -369,6 +396,8 @@ export const uiMenu = () => {
                         <SocialHud wide={wide} />
                         <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <SocialAgendaButton wide={wide} />
+                        <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
+                        <LeaderboardButton wide={wide} />
                     </UiEntity>
                 </UiEntity>
                 {/* Compact toast presentation for the right slot on every platform - the large
@@ -402,7 +431,7 @@ export const uiMenu = () => {
                     rendering them together let the gameplay panel show through underneath the Agenda.
                     The Agenda temporarily owns this central area instead; gameplay reappears the instant
                     socialAgendaOpen goes false (including via the existing ANSWERING auto-close rule). */}
-                {session.inZone && !socialAgendaOpen && (
+                {session.inZone && !socialAgendaOpen && !leaderboardOpen && (
                     <UiEntity
                         uiTransform={{
                             width: isWaitingPhase ? WAITING_PANEL_WIDTH : GAMEPLAY_PANEL_WIDTH,
@@ -468,6 +497,12 @@ export const uiMenu = () => {
             {socialAgendaOpen && (
                 <UiEntity uiTransform={{ positionType: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
                     <SocialAgenda wide={wide} compactUi={compact} />
+                </UiEntity>
+            )}
+
+            {leaderboardOpen && (
+                <UiEntity uiTransform={{ positionType: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                    <LeaderboardPanel wide={wide} />
                 </UiEntity>
             )}
         </ScreenInsetArea>
@@ -873,6 +908,7 @@ const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
                 if (roundManager.getSnapshot().phase === 'answering') return
                 socialAgendaPage = 0
                 socialAgendaOpen = true
+                leaderboardOpen = false // mutually exclusive centered overlays - see leaderboardOpen's own doc comment
             }}
         >
             {/* Spine: reads as a notebook's binding edge. */}
@@ -1003,6 +1039,160 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                     </UiEntity>
                 )}
             </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * Opens the Leaderboard overlay (Phase 2B-3) - same fixed-position role in
+ * the HUD group as SocialAgendaButton next to it, same ANSWERING/ANSWER
+ * LOCKED tap-disable rule, same "✦" glyph already validated in production
+ * (see celebration toasts) rather than an unverified new icon (see
+ * AGENDA_BUTTON_* doc comment for why glyphs are chosen this carefully
+ * here). A tap requests fresh data every time - no cached-is-good-enough
+ * skip - but never clears whatever response is already showing, so a
+ * previous result stays visible while the new one is in flight.
+ */
+const LeaderboardButton = ({ wide }: { wide: boolean }) => {
+    const size = wide ? AGENDA_BUTTON_SIZE_WIDE : AGENDA_BUTTON_SIZE_COMPACT
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width: size,
+                height: size,
+                justifyContent: 'center',
+                alignItems: 'center',
+                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
+                borderWidth: 1,
+                borderRadius: 8
+            }}
+            uiBackground={{ color: PANEL_BACKGROUND }}
+            onMouseDown={() => {
+                // Covers ANSWER LOCKED too - same reasoning as SocialAgendaButton above.
+                if (roundManager.getSnapshot().phase === 'answering') return
+                leaderboardOpen = true
+                socialAgendaOpen = false // mutually exclusive centered overlays - see leaderboardOpen's own doc comment
+                requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer
+            }}
+        >
+            <Label value="✦" fontSize={wide ? 22 : 18} color={Color4.create(1, 0.85, 0.2, 1)} />
+        </UiEntity>
+    )
+}
+
+/**
+ * Leaderboard overlay - opened via LeaderboardButton (see uiMenu). Purely a
+ * renderer of getLatestLeaderboardResponse()'s current value; builds no
+ * ranking/networking logic of its own (see leaderboardNetwork.ts /
+ * leaderboardRanking.ts for that). Closing only flips leaderboardOpen -
+ * latestLeaderboardResponse is deliberately never cleared, so reopening
+ * shows the last known result instantly while a fresh request is in flight
+ * (see LeaderboardButton's onMouseDown).
+ */
+const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
+    const response = getLatestLeaderboardResponse()
+
+    const close = () => {
+        leaderboardOpen = false
+    }
+
+    return (
+        <UiEntity
+            uiTransform={{ flexDirection: 'column', width: wide ? LEADERBOARD_WIDTH_WIDE : LEADERBOARD_WIDTH_COMPACT }}
+            uiBackground={{ color: PANEL_BACKGROUND }}
+        >
+            {/* Header is the whole-row tap target to close - same proven pattern as the Social Agenda's own header. */}
+            <UiEntity
+                uiTransform={{
+                    width: '100%',
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: { top: 18, bottom: 18, left: 20, right: 20 }
+                }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={close}
+            >
+                <Label value="LEADERBOARD" fontSize={22} color={Color4.create(1, 0.85, 0.2, 1)} />
+                <Label value="✕" fontSize={22} color={Color4.White()} />
+            </UiEntity>
+
+            <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', padding: { top: 16, bottom: 20, left: 20, right: 20 } }}>
+                {response === null ? (
+                    <Label value="Loading leaderboard..." fontSize={18} color={MUTED} />
+                ) : response.status === 'hydrating' ? (
+                    <Label
+                        value="The leaderboard is still starting up. Try again in a few seconds."
+                        fontSize={16}
+                        textAlign="middle-center"
+                        textWrap="wrap"
+                        color={MUTED}
+                    />
+                ) : (
+                    <LeaderboardReadyContent response={response} wide={wide} />
+                )}
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * `response.status === 'ready'` content only - split out from LeaderboardPanel
+ * purely so that branch doesn't need an inline cast. `me` is matched against
+ * `top` strictly by userId (never displayName, never rank) - see
+ * meAlreadyInTop below - since displayName can collide (two "Questmate"
+ * fallbacks) and rank is exactly the value being compared against.
+ */
+const LeaderboardReadyContent = ({ response, wide }: { response: LeaderboardResponse; wide: boolean }) => {
+    const { top, me } = response
+    const meAlreadyInTop = me !== null && top.some((entry) => entry.userId === me.userId)
+
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%' }}>
+            {top.length === 0 ? (
+                <Label value="No players ranked yet." fontSize={16} color={MUTED} />
+            ) : (
+                top.map((entry) => (
+                    <UiEntity key={entry.userId} uiTransform={{ width: '100%' }}>
+                        <LeaderboardRow entry={entry} highlighted={me !== null && entry.userId === me.userId} wide={wide} />
+                    </UiEntity>
+                ))
+            )}
+
+            {me === null ? (
+                <UiEntity uiTransform={{ margin: { top: 14 } }}>
+                    <Label value="You haven't made progress yet." fontSize={16} color={MUTED} />
+                </UiEntity>
+            ) : !meAlreadyInTop ? (
+                <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', margin: { top: 14 } }}>
+                    <Label value="YOUR RANK" fontSize={14} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
+                    <LeaderboardRow entry={me} highlighted={true} wide={wide} />
+                </UiEntity>
+            ) : null}
+        </UiEntity>
+    )
+}
+
+/** One ranked row: rank/name on the left, Social Points/Quest Progress on the right. `highlighted` marks the local player's own row (by userId match only - see LeaderboardReadyContent) with a tinted background, same accent color already used for borders throughout this file. */
+const LeaderboardRow = ({ entry, highlighted, wide }: { entry: LeaderboardRankedEntry; highlighted: boolean; wide: boolean }) => {
+    const rowHeight = wide ? LEADERBOARD_ROW_HEIGHT_WIDE : LEADERBOARD_ROW_HEIGHT_COMPACT
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width: '100%',
+                height: rowHeight,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: { left: 8, right: 8 },
+                margin: { bottom: LEADERBOARD_ROW_GAP }
+            }}
+            uiBackground={highlighted ? { color: Color4.create(0.6, 0.45, 0.85, 0.35) } : undefined}
+        >
+            <Label value={`#${entry.rank}  ${entry.displayName}`} fontSize={wide ? 18 : 15} color={Color4.White()} />
+            <Label value={`${entry.socialPoints} SP · ${entry.questProgress}/5`} fontSize={wide ? 14 : 12} color={MUTED} />
         </UiEntity>
     )
 }
