@@ -58,6 +58,27 @@
         "serializationType": "transform"
       },
       "data": {
+        "513": {
+          "json": {
+            "position": {
+              "x": 16.40060806274414,
+              "y": 0,
+              "z": 14.5
+            },
+            "rotation": {
+              "x": 0,
+              "y": 1,
+              "z": 0,
+              "w": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "parent": 0
+          }
+        },
         "514": {
           "json": {
             "position": {
@@ -121,6 +142,27 @@
             "parent": 0
           }
         },
+        "518": {
+          "json": {
+            "position": {
+              "x": 16.359216690063477,
+              "y": 0,
+              "z": 14.5
+            },
+            "rotation": {
+              "x": 0,
+              "y": 1,
+              "z": 0,
+              "w": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "parent": 0
+          }
+        },
         "131588": {
           "json": {
             "position": {
@@ -141,27 +183,6 @@
             },
             "parent": 0
           }
-        },
-        "852480": {
-          "json": {
-            "position": {
-              "x": 16.325326919555664,
-              "y": 0,
-              "z": 14.507364273071289
-            },
-            "scale": {
-              "x": 1,
-              "y": 1,
-              "z": 1
-            },
-            "rotation": {
-              "x": 0,
-              "y": 1,
-              "z": 0,
-              "w": 0
-            },
-            "parent": 0
-          }
         }
       }
     },
@@ -174,7 +195,14 @@
         "protocolBuffer": "PBGltfContainer"
       },
       "data": {
-        "852480": {
+        "513": {
+          "json": {
+            "src": "assets/Models/panel/panel.glb",
+            "visibleMeshesCollisionMask": 0,
+            "invisibleMeshesCollisionMask": 3
+          }
+        },
+        "518": {
           "json": {
             "src": "assets/Models/social_quest/social_quest.glb",
             "visibleMeshesCollisionMask": 0,
@@ -196,6 +224,11 @@
         "serializationType": "map"
       },
       "data": {
+        "513": {
+          "json": {
+            "value": "panel.glb"
+          }
+        },
         "514": {
           "json": {
             "value": "Spotlight"
@@ -211,14 +244,14 @@
             "value": "Spotlight_4"
           }
         },
+        "518": {
+          "json": {
+            "value": "social_quest.glb"
+          }
+        },
         "131588": {
           "json": {
             "value": "Spotlight_5"
-          }
-        },
-        "852480": {
-          "json": {
-            "value": "social_quest.glb"
           }
         }
       }
@@ -338,26 +371,6 @@
       }
     },
     {
-      "name": "inspector::Selection",
-      "jsonSchema": {
-        "type": "object",
-        "properties": {
-          "gizmo": {
-            "type": "integer",
-            "serializationType": "int32"
-          }
-        },
-        "serializationType": "map"
-      },
-      "data": {
-        "0": {
-          "json": {
-            "gizmo": 0
-          }
-        }
-      }
-    },
-    {
       "name": "inspector::Nodes",
       "jsonSchema": {
         "type": "object",
@@ -403,11 +416,12 @@
                 "entity": 0,
                 "open": true,
                 "children": [
-                  852480,
                   514,
                   131588,
                   515,
-                  517
+                  517,
+                  513,
+                  518
                 ]
               },
               {
@@ -416,10 +430,6 @@
               },
               {
                 "entity": 2,
-                "children": []
-              },
-              {
-                "entity": 852480,
                 "children": []
               },
               {
@@ -436,6 +446,14 @@
               },
               {
                 "entity": 131588,
+                "children": []
+              },
+              {
+                "entity": 513,
+                "children": []
+              },
+              {
+                "entity": 518,
                 "children": []
               }
             ]
@@ -460,6 +478,9 @@
         "serializationType": "map"
       },
       "data": {
+        "513": {
+          "json": {}
+        },
         "514": {
           "json": {}
         },
@@ -469,10 +490,10 @@
         "517": {
           "json": {}
         },
-        "131588": {
+        "518": {
           "json": {}
         },
-        "852480": {
+        "131588": {
           "json": {}
         }
       }
@@ -1627,14 +1648,8 @@
             ],
             "author": "Meryshark",
             "email": "iamfacemoon@gmail.com",
-            "tags": [
-              ""
-            ],
+            "tags": [],
             "layout": {
-              "base": {
-                "x": 0,
-                "y": 0
-              },
               "parcels": [
                 {
                   "x": 0,
@@ -1652,8 +1667,14 @@
                   "x": 1,
                   "y": 0
                 }
-              ]
+              ],
+              "base": {
+                "x": 0,
+                "y": 0
+              }
             },
+            "silenceVoiceChat": false,
+            "disablePortableExperiences": false,
             "spawnPoints": [
               {
                 "name": "SpawnArea1",
@@ -1667,8 +1688,11 @@
                     ]
                   },
                   "y": {
-                    "$case": "single",
-                    "value": 0
+                    "$case": "range",
+                    "value": [
+                      0,
+                      0
+                    ]
                   },
                   "z": {
                     "$case": "range",
@@ -1686,7 +1710,9 @@
               }
             ],
             "skyboxConfig": {},
-            "creator": "0xe339ebC7EC708BF42EEd1B54a4Df852312DB2c5b"
+            "creator": "0xe339ebC7EC708BF42EEd1B54a4Df852312DB2c5b",
+            "disableNearbyVoiceChat": false,
+            "hideLandscapeTerrain": false
           }
         }
       }
