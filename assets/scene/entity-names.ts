@@ -9,6 +9,8 @@ export enum EntityNames {
   Spotlight_2 = "Spotlight_2",
   Spotlight_4 = "Spotlight_4",
   Spotlight_5 = "Spotlight_5",
+  lampara_glb = "lampara.glb",
   panel_glb = "panel.glb",
+  playquest_glb = "playquest.glb",
   social_quest_glb = "social_quest.glb",
 } 

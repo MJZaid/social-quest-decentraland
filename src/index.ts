@@ -5,6 +5,7 @@ import { setupUi } from './ui'
 import { initPersistenceClient, initPersistenceServer } from './persistenceManager'
 import { initLeaderboardNetworkClient, initLeaderboardNetworkServer } from './leaderboardNetwork'
 import { initLeaderboardDisplay3D } from './leaderboardDisplay3D'
+import { initPlayquestRotation } from './playquestRotation'
 
 export function main() {
     // isServer() must be read here, inside main() - calling it at module
@@ -20,6 +21,7 @@ export function main() {
     initLeaderboardNetworkClient()
     setupUi()
     initLeaderboardDisplay3D()
+    initPlayquestRotation()
 
     // your scene code here
 }
