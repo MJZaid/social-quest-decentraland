@@ -30,8 +30,8 @@ const LOADING_TEXT = 'LOADING SOCIAL QUESTERS...'
 const TITLE_COLOR = Color4.create(1, 0.85, 0.2, 1)
 const ROW_COLOR = Color4.create(1, 1, 1, 1)
 /** Bumped up progressively across visual calibration passes in preview - 0.45/0.35 read too small, then 0.65/0.48 still too small at normal viewing distance. */
-const TITLE_FONT_SIZE = 1.2
-const ROW_FONT_SIZE = 0.65
+const TITLE_FONT_SIZE = 1.35
+const ROW_FONT_SIZE = 1.15
 
 /**
  * Layout in the panel ENTITY's own local space (i.e. what a child Transform
@@ -48,7 +48,7 @@ const SCREEN_CENTER_X = 0.7
 /** Top of the screen's usable area (screen spans local y ~1.57 to ~5.87) - title sits just below the top edge. Confirmed on-screen in preview at this Y. */
 const SCREEN_TITLE_Y = 5.55
 /** Vertical gap between the title/each row - 6 lines (title + 5 rows) across the screen's ~4.3-unit height. */
-const ROW_SPACING = 0.62
+const ROW_SPACING = 0.5
 /** Screen surface is at local z ~ -6.671 (facing +Z); text sits a small standoff in front of it to avoid z-fighting with the "pantalla" mesh. Confirmed on-screen in preview at this Z. */
 const TEXT_LOCAL_Z = -6.6
 /** Matches the screen's real local width (~2.71) so centered text doesn't overhang the panel's edges. */
