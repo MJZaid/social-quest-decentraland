@@ -348,9 +348,14 @@ export const uiMenu = () => {
     if (socialAgendaOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
         socialAgendaOpen = false
     }
-    // Same auto-close rule as Social Agenda above, same reasoning - a centered
-    // overlay must never be left open over gameplay that needs attention.
-    if (leaderboardOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
+    // Phase 2B-4: deliberately NOT the same rule as Social Agenda above.
+    // Leaderboard is scene-level social information, reachable from the
+    // physical panel without JOIN - unlike Agenda, it must never auto-close
+    // just because the player is standing in the Quest Zone unjoined
+    // (`session.inZone && !session.joined`), even though that means it can
+    // sit in front of the JOIN screen while open. It still closes the
+    // instant real gameplay needs the screen, same as Agenda.
+    if (leaderboardOpen && round.phase === 'answering') {
         leaderboardOpen = false
     }
 
@@ -1052,6 +1057,11 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
  * here). A tap requests fresh data every time - no cached-is-good-enough
  * skip - but never clears whatever response is already showing, so a
  * previous result stays visible while the new one is in flight.
+ *
+ * Unlike SocialAgendaButton, opening this does NOT require `session.joined`
+ * (see the leaderboardOpen auto-close rule in uiMenu) - the leaderboard is
+ * scene-level social information, not gameplay, so a visitor can check it
+ * without ever pressing JOIN.
  */
 const LeaderboardButton = ({ wide }: { wide: boolean }) => {
     const size = wide ? AGENDA_BUTTON_SIZE_WIDE : AGENDA_BUTTON_SIZE_COMPACT

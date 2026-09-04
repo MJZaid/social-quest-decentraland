@@ -4,6 +4,7 @@ import { isServer } from '@dcl/sdk/network'
 import { setupUi } from './ui'
 import { initPersistenceClient, initPersistenceServer } from './persistenceManager'
 import { initLeaderboardNetworkClient, initLeaderboardNetworkServer } from './leaderboardNetwork'
+import { initLeaderboardDisplay3D } from './leaderboardDisplay3D'
 
 export function main() {
     // isServer() must be read here, inside main() - calling it at module
@@ -18,6 +19,7 @@ export function main() {
     initPersistenceClient()
     initLeaderboardNetworkClient()
     setupUi()
+    initLeaderboardDisplay3D()
 
     // your scene code here
 }
