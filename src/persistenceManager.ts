@@ -28,6 +28,8 @@ import {
 import { enqueueWrite } from './storageWriteQueue'
 import { scheduleLeaderboardSync, retryPendingLeaderboardSyncs, hydrateLeaderboardCache } from './leaderboardManager'
 import { scheduleTopMatchSync, retryPendingTopMatchSyncs, hydrateTopMatchesCache } from './topMatchesManager'
+import { getWeekKey } from './weekKey'
+import { applyWeeklyPairEvent, hydrateTopMatchesWeeklyCache, checkTopMatchesWeeklyRollover } from './topMatchesWeeklyManager'
 
 // -----------------------------------------------------------------------
 // PERSISTENCE v1 - side channel only.
@@ -80,6 +82,45 @@ const serverProfiles = new Map<string, PersistedSocialQuestProfileV1>()
 const loadingInFlight = new Map<string, Promise<ProfileLoadOutcome<PersistedSocialQuestProfileV1>>>()
 /** Fast-path, in-memory-only record of round-pair events already handled THIS server process - avoids redundant work when the same pair is re-scanned on later RESULT ticks. Not the source of truth: each player's own persisted recentProcessedEventIds is, and is checked independently before every write, so this Set being empty on a fresh server boot is always safe. */
 const processedPairEventsInMemory = new Set<string>()
+
+/**
+ * roundId -> weekKey, captured ONCE per round and never recalculated - see
+ * captureRoundWeekKeyIfNeeded below. This is the piece that lets Top Matches
+ * THIS WEEK (topMatchesWeeklyManager.ts) associate a round with the week it
+ * actually happened in, rather than whatever week a later retry happens to
+ * run in - RoundStateValue itself (networkRoundState.ts) carries no
+ * timestamp, so this is server-only, in-memory bookkeeping, never synced to
+ * clients and never a schema change to gameplay state. Bounded to the most
+ * recent MAX_TRACKED_ROUND_WEEK_KEYS roundIds - a RESULT-tick rescan only
+ * ever needs the current round's (or, briefly, the previous round's)
+ * weekKey, never the entire session's history.
+ */
+const roundWeekKeys = new Map<number, string>()
+const MAX_TRACKED_ROUND_WEEK_KEYS = 20
+
+/**
+ * Captures `state.roundId`'s weekKey the first time it's observed - preferring
+ * the ANSWERING phase specifically, since that's the moment a roundId first
+ * represents an actual new round (during WAITING/COUNTDOWN, `state.roundId`
+ * still refers to the PREVIOUS completed round, not a new one about to
+ * start - capturing then would attribute the wrong semantic moment). Falls
+ * back to capturing on RESULT if ANSWERING was somehow never observed for
+ * this roundId (e.g. the server started observing an already-in-progress
+ * round right after a restart) - better than never capturing a weekKey for
+ * that round at all. Once captured for a given roundId, never recalculated -
+ * immune to how many times or how late a retry later re-reads it.
+ */
+function captureRoundWeekKeyIfNeeded(state: RoundStateValue): void {
+    if (state.phase !== SharedPhase.ANSWERING && state.phase !== SharedPhase.RESULT) return
+    if (roundWeekKeys.has(state.roundId)) return
+
+    const weekKey = getWeekKey(Date.now())
+    roundWeekKeys.set(state.roundId, weekKey)
+    if (roundWeekKeys.size > MAX_TRACKED_ROUND_WEEK_KEYS) {
+        const oldestRoundId = roundWeekKeys.keys().next().value
+        if (oldestRoundId !== undefined) roundWeekKeys.delete(oldestRoundId)
+    }
+}
 
 /**
  * Result of one profile load attempt (either domain - Connections or Social
@@ -404,6 +445,12 @@ function resolveObservedDisplayName(userId: string): string | undefined {
 function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
     if (state.phase !== SharedPhase.RESULT) return
 
+    // The single canonical observation of this roundId's weekKey - captured once,
+    // at the first ANSWERING (or, exceptionally, first-ever) observation of this
+    // roundId, by captureRoundWeekKeyIfNeeded() in the tick below. The `?? getWeekKey(Date.now())`
+    // fallback only matters if that capture was somehow missed entirely - it should
+    // never be needed in practice, but never blocks weekly processing if it is.
+    const weekKey = roundWeekKeys.get(state.roundId) ?? getWeekKey(Date.now())
     const answers = getAnswersForRound(state.roundId).filter((answer) => answer.option !== AnswerOption.NO_ANSWER)
 
     for (let i = 0; i < answers.length; i++) {
@@ -416,7 +463,17 @@ function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
             // matches against.
             const nameA = resolveObservedDisplayName(a.userId)
             const nameB = resolveObservedDisplayName(b.userId)
-            void processRoundPair(state.roundId, normalizeUserId(a.userId), normalizeUserId(b.userId), a.option === b.option, nameA, nameB)
+            const same = a.option === b.option
+            void processRoundPair(state.roundId, normalizeUserId(a.userId), normalizeUserId(b.userId), same, nameA, nameB)
+
+            // Top Matches THIS WEEK - a fully separate domain from Connections/ALL TIME
+            // above, fed by the SAME single canonical observation of this pair/round
+            // (same `same` boolean, no recomputation) but processed independently: its
+            // own eventId, own dedup, own Storage key, own failure handling. A failure
+            // here can never affect processRoundPair above, and vice versa - see
+            // topMatchesWeeklyManager.ts's own file-level doc comment.
+            const weeklyEventId = `${weekKey}:${SERVER_SESSION_ID}:${state.roundId}:${sortedPairKey(a.userId, b.userId)}`
+            void applyWeeklyPairEvent(weekKey, normalizeUserId(a.userId), normalizeUserId(b.userId), same, weeklyEventId, nameA, nameB)
         }
     }
 }
@@ -960,6 +1017,8 @@ export function initPersistenceServer(): void {
     void hydrateLeaderboardCache()
     // Same reasoning, own separate index - see hydrateTopMatchesCache()'s own doc comment.
     void hydrateTopMatchesCache()
+    // Same reasoning, own separate (per-week) index - see hydrateTopMatchesWeeklyCache()'s own doc comment.
+    void hydrateTopMatchesWeeklyCache()
 
     persistenceRoom.onMessage('requestProfile', async (_data, context) => {
         if (!context) {
@@ -997,15 +1056,23 @@ export function initPersistenceServer(): void {
     if (serverTickIntervalId === null) {
         serverTickIntervalId = setInterval(() => {
             const state = getRoundState()
+            // Unconditional - runs regardless of phase, so a roundId's weekKey is
+            // captured the moment it first becomes ANSWERING, not only once RESULT
+            // is reached. See captureRoundWeekKeyIfNeeded's own doc comment.
+            captureRoundWeekKeyIfNeeded(state)
             scanCurrentRoundForValidPairs(state)
             scanCurrentRoundForSocialPoints(state)
-            // All three unconditional - NOT gated on RESULT phase like the two scans
+            // All unconditional - NOT gated on RESULT phase like the two scans
             // above. A pending leaderboard mirror sync, Friendship bonus, or Top
             // Matches sync can still need retrying long after the RESULT that
             // produced it has ended; see each function's own doc comment.
             retryPendingLeaderboardSyncs()
             retryPendingFriendshipBonuses()
             retryPendingTopMatchSyncs()
+            // Detects a Monday 00:00 UTC rollover purely by comparing timestamps,
+            // every tick - never depends on a server restart happening near the
+            // boundary. See checkTopMatchesWeeklyRollover's own doc comment.
+            checkTopMatchesWeeklyRollover()
         }, 1000)
     }
 }
