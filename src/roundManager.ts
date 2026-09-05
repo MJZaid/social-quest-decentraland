@@ -123,6 +123,15 @@ class RoundManager {
     private lastObservedRoundId: number | null = null
     private lastObservedPhase: SharedPhase | null = null
 
+    /**
+     * The roundId this client was ACTIVE for at the moment it first observed that round
+     * starting - frozen from then on, deliberately never re-derived from `joined` again.
+     * `joined` still governs eligibility for FUTURE rounds (see getActiveUserIds), but once a
+     * round has actually started, leaving the Quest Zone must not retroactively strip this
+     * client's own participation in it - see maybePublishAnswer(), the only reader.
+     */
+    private participatingRoundId: number | null = null
+
     /** roundId this client has already published its own PlayerAnswer for (publish-once guard). */
     private publishedForRoundId: number | null = null
 
@@ -272,34 +281,46 @@ class RoundManager {
         return nextState
     }
 
-    /** Runs the round lifecycle. Only ever invoked when this client IS the coordinator. */
+    /**
+     * Runs the round lifecycle. Only ever invoked when this client IS the coordinator.
+     *
+     * WAITING/COUNTDOWN require quorum (>= MIN_PLAYERS_REQUIRED) to proceed - losing it
+     * cancels a countdown or simply keeps WAITING. ANSWERING/RESULT are the opposite: once a
+     * round has actually started, it always runs to completion regardless of eligibleCount -
+     * a player leaving the Quest Zone mid-round affects their eligibility for FUTURE rounds,
+     * never retroactively invalidates the one already in flight (that round's own answers/
+     * reveal are handled entirely by the existing PlayerAnswer/timeout machinery, untouched
+     * here). Quorum is only re-checked for the round that would come NEXT, inside
+     * startNewRound() - see its own doc comment for why that can't reuse this eligibleCount.
+     */
     private runCoordinatorLogic(state: RoundStateValue, eligibleCount: number): void {
-        if (eligibleCount < MIN_PLAYERS_REQUIRED) {
-            if (state.phase !== SharedPhase.WAITING) {
-                this.selectedOption = null
-                writeRoundState({
-                    ...state,
-                    phase: SharedPhase.WAITING,
-                    questionIndex: NO_QUESTION,
-                    secondsLeft: 0,
-                    participantCount: 0
-                })
+        if (state.phase === SharedPhase.WAITING || state.phase === SharedPhase.COUNTDOWN) {
+            if (eligibleCount < MIN_PLAYERS_REQUIRED) {
+                if (state.phase !== SharedPhase.WAITING) {
+                    this.selectedOption = null
+                    writeRoundState({
+                        ...state,
+                        phase: SharedPhase.WAITING,
+                        questionIndex: NO_QUESTION,
+                        secondsLeft: 0,
+                        participantCount: 0
+                    })
+                }
+                return
             }
-            return
-        }
 
-        if (state.phase === SharedPhase.WAITING) {
-            // Quorum just met - start the pre-round countdown instead of the round itself.
-            // roundId is deliberately left untouched here (see relevantRoundId's doc comment).
-            writeRoundState({ ...state, phase: SharedPhase.COUNTDOWN, secondsLeft: COUNTDOWN_SECONDS })
-            return
-        }
+            if (state.phase === SharedPhase.WAITING) {
+                // Quorum just met - start the pre-round countdown instead of the round itself.
+                // roundId is deliberately left untouched here (see relevantRoundId's doc comment).
+                writeRoundState({ ...state, phase: SharedPhase.COUNTDOWN, secondsLeft: COUNTDOWN_SECONDS })
+                return
+            }
 
-        if (state.phase === SharedPhase.COUNTDOWN) {
-            // Dedicated branch, not the generic secondsLeft-- below: transitions to ANSWERING
-            // the instant secondsLeft would hit 1->0, so the UI shows exactly 3/2/1 with no
-            // trailing "0" frame before the question appears (unlike ANSWERING/RESULT's own
-            // countdowns, which do show a final 0 - not changed here, only COUNTDOWN's).
+            // COUNTDOWN, quorum still held this tick. Dedicated branch, not the generic
+            // secondsLeft-- below: transitions to ANSWERING the instant secondsLeft would hit
+            // 1->0, so the UI shows exactly 3/2/1 with no trailing "0" frame before the
+            // question appears (unlike ANSWERING/RESULT's own countdowns, which do show a
+            // final 0 - not changed here, only COUNTDOWN's).
             if (state.secondsLeft > 1) {
                 writeRoundState({ ...state, secondsLeft: state.secondsLeft - 1 })
             } else {
@@ -308,6 +329,8 @@ class RoundManager {
             return
         }
 
+        // ANSWERING or RESULT: a round already in flight runs to completion no matter what
+        // eligibleCount does in the meantime - see this method's doc comment.
         if (state.secondsLeft > 0) {
             writeRoundState({ ...state, secondsLeft: state.secondsLeft - 1 })
             return
@@ -316,15 +339,33 @@ class RoundManager {
         if (state.phase === SharedPhase.ANSWERING) {
             writeRoundState({ ...state, phase: SharedPhase.RESULT, secondsLeft: RESULT_SECONDS })
         } else {
-            // RESULT finished - straight into the next question, no countdown between rounds.
+            // RESULT finished - startNewRound() itself decides whether quorum holds for the
+            // next round (roundId + 1) or this bounces back to WAITING instead.
             this.startNewRound(state)
         }
     }
 
+    /**
+     * Starts the next round (from WAITING/COUNTDOWN's very first round, from COUNTDOWN
+     * finishing, or from RESULT finishing) - OR bounces to WAITING instead if quorum no
+     * longer holds for it. Deliberately re-checks eligibility here against `nextRoundId`
+     * rather than trusting the caller's own `eligibleCount`: when called after RESULT, that
+     * value was computed against the round that just ENDED (relevantRoundId() only adds +1
+     * during WAITING/COUNTDOWN), which can disagree with nextRoundId's real eligibility - e.g.
+     * a player who joined mid-RESULT is eligible for nextRoundId but wouldn't have counted
+     * against the round that's ending. This is the single place that decides "is there
+     * quorum for the round about to start", used identically by both callers.
+     */
     private startNewRound(state: RoundStateValue): void {
         const nextRoundId = state.roundId + 1
         const participantCount = getActiveUserIds(nextRoundId).length
         this.selectedOption = null
+
+        if (participantCount < MIN_PLAYERS_REQUIRED) {
+            writeRoundState({ ...state, phase: SharedPhase.WAITING, questionIndex: NO_QUESTION, secondsLeft: 0, participantCount: 0 })
+            return
+        }
+
         writeRoundState({
             ...state,
             roundId: nextRoundId,
@@ -339,9 +380,12 @@ class RoundManager {
      * Local-only bookkeeping every client runs regardless of coordinator role: clearing
      * the private answer on a new round, and evaluating this client's own AFK status the
      * moment it observes its own round's normal ANSWERING -> RESULT transition (same
-     * roundId). Deliberately NOT triggered by ANSWERING -> WAITING (e.g. the round is
-     * aborted back to WAITING because another player left and fewer than 2 active players
-     * remain) - that is an interrupted round, not a missed answer.
+     * roundId). ANSWERING can no longer abort straight back to WAITING (a round in flight
+     * always reaches RESULT now, regardless of eligibleCount - see runCoordinatorLogic's own
+     * doc comment) - the only remaining WAITING-bound transitions are WAITING/COUNTDOWN
+     * losing quorum before a round starts, or RESULT ending with no quorum for the next one
+     * (via startNewRound), neither of which is an "ANSWERING just ended" case this method
+     * needs to special-case.
      */
     private syncLocalBookkeeping(state: RoundStateValue): void {
         const isNewRound = state.roundId !== this.lastObservedRoundId
@@ -358,6 +402,10 @@ class RoundManager {
             // Never let a transient AFK notice linger into a new round's answer buttons.
             this.afkMessage = null
             this.afkMessageTicksRemaining = 0
+            // Freeze participation for this round, right now, based on eligibility at this
+            // exact moment - see participatingRoundId's own doc comment. Deliberately the
+            // only place this is (re)computed; nothing else ever revisits it for this roundId.
+            this.participatingRoundId = getActiveUserIds(state.roundId).includes(myProfile.userId) ? state.roundId : null
         }
         this.lastObservedPhase = state.phase
     }
@@ -395,10 +443,17 @@ class RoundManager {
         this.afkMessageTicksRemaining = AFK_MESSAGE_TICKS
     }
 
-    /** Publishes this client's own answer exactly once, the first tick RESULT is observed for this round - only if ACTIVE for it. */
+    /**
+     * Publishes this client's own answer exactly once, the first tick RESULT is observed for
+     * this round - only if this client was a PARTICIPANT of this specific round (frozen at
+     * the moment it started - see participatingRoundId's own doc comment), not whether it's
+     * currently `joined`/active right now. A player who left the Quest Zone mid-round still
+     * publishes their real A/B choice (or NO_ANSWER) here; a spectator who was never part of
+     * this round still correctly never does.
+     */
     private maybePublishAnswer(state: RoundStateValue): void {
         if (state.phase !== SharedPhase.RESULT) return
-        if (!getActiveUserIds(state.roundId).includes(myProfile.userId)) return
+        if (this.participatingRoundId !== state.roundId) return
         if (this.publishedForRoundId === state.roundId) return
         this.publishedForRoundId = state.roundId
 
