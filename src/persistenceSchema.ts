@@ -49,15 +49,36 @@ export function normalizeUserId(userId: string): string {
 }
 
 /**
- * Order-independent pair key so `roundId:A,B` and `roundId:B,A` always mean
- * the same event. Shared by both server (persisting a pair's outcome) and
- * client (reconstructing the same event id to check whether a locally-known
- * round is already reflected in a just-loaded persisted snapshot - see
- * persistenceManager.ts's hydration-race handling) - must stay byte-identical
- * on both sides, hence living here rather than being duplicated.
+ * The two userIds sortedPairKey() combines, normalized HERE (not left to the
+ * caller) and returned in the exact canonical order sortedPairKey's own
+ * `.sort()` produces - see sortedPairKey below, which is now defined in terms
+ * of this, so the two can never disagree about ordering. Used directly by
+ * topMatchesManager.ts wherever a pair's canonical userA/userB fields need to
+ * be assigned - they must always be derived from this same function, never
+ * recomputed ad hoc, so a pair's identity (pairKey) and its stored member
+ * order can never drift apart.
+ */
+export function sortedPairMembers(a: string, b: string): [string, string] {
+    const sorted = [normalizeUserId(a), normalizeUserId(b)].sort()
+    return [sorted[0], sorted[1]]
+}
+
+/**
+ * Order-independent, case-independent pair key so `roundId:A,B` and
+ * `roundId:B,A` always mean the same event, and (as of topMatchesManager.ts)
+ * so the SAME persistent pair identity survives across sessions regardless of
+ * casing - normalizes both ids internally (via sortedPairMembers) rather than
+ * trusting every call site to have already done it, exactly like
+ * friendshipBonusKey below: `sortedPairKey('0xABC','0xdef')` and
+ * `sortedPairKey('0xabc','0xDEF')` must always produce the identical string,
+ * never two different keys for what is really the same pair. Shared by
+ * server (persisting a pair's outcome), client (hydration-race
+ * reconciliation - see persistenceManager.ts), and Top Matches (the pair's
+ * global index identity) - must stay byte-identical across all three, hence
+ * living here rather than being duplicated.
  */
 export function sortedPairKey(a: string, b: string): string {
-    return [a, b].sort().join(',')
+    return sortedPairMembers(a, b).join(',')
 }
 
 function isFiniteNonNegativeInt(value: unknown): value is number {

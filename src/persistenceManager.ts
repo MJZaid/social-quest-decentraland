@@ -27,6 +27,7 @@ import {
 } from './persistenceSchema'
 import { enqueueWrite } from './storageWriteQueue'
 import { scheduleLeaderboardSync, retryPendingLeaderboardSyncs, hydrateLeaderboardCache } from './leaderboardManager'
+import { scheduleTopMatchSync, retryPendingTopMatchSyncs, hydrateTopMatchesCache } from './topMatchesManager'
 
 // -----------------------------------------------------------------------
 // PERSISTENCE v1 - side channel only.
@@ -76,32 +77,82 @@ const SERVER_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(3
  */
 const serverProfiles = new Map<string, PersistedSocialQuestProfileV1>()
 /** Addresses currently mid-load, so a second caller arriving before the first Storage.player.get() resolves doesn't race it - both await the same promise. */
-const loadingInFlight = new Map<string, Promise<PersistedSocialQuestProfileV1>>()
+const loadingInFlight = new Map<string, Promise<ProfileLoadOutcome<PersistedSocialQuestProfileV1>>>()
 /** Fast-path, in-memory-only record of round-pair events already handled THIS server process - avoids redundant work when the same pair is re-scanned on later RESULT ticks. Not the source of truth: each player's own persisted recentProcessedEventIds is, and is checked independently before every write, so this Set being empty on a fresh server boot is always safe. */
 const processedPairEventsInMemory = new Set<string>()
 
-async function loadProfile(address: string): Promise<PersistedSocialQuestProfileV1> {
+/**
+ * Result of one profile load attempt (either domain - Connections or Social
+ * Points). `loadedSuccessfully` is what every write path (applyDeltaToPlayer,
+ * applySocialPointsEvent, awardFriendshipBonuses) MUST check before building
+ * a Storage.player.set candidate on top of `profile` - see this file's own
+ * data-integrity audit (loadProfile/loadSocialPointsProfile below).
+ *
+ * Deliberately a boolean, not a three-way 'loaded' | 'missing' | 'failed'
+ * enum: nothing in this file ever needs to tell "real data" apart from
+ * "confirmed no data yet" - both are equally safe to build a write candidate
+ * on top of (a brand new player's very first round increments from
+ * `{roundsTogether: 0, ...}` either way). The ONLY distinction that changes
+ * behavior anywhere is "was the underlying Storage.player.get call itself
+ * confirmed" (true for both LOADED and MISSING) vs "did it fail" (false) -
+ * exactly what this one boolean encodes, with no unused states to keep in
+ * sync.
+ */
+interface ProfileLoadOutcome<T> {
+    profile: T
+    loadedSuccessfully: boolean
+}
+
+/**
+ * Loads `address`'s Connections profile, distinguishing a confirmed read
+ * (real data, or confirmed-absent - raw === null - both `loadedSuccessfully:
+ * true`) from a failed Storage.player.get (`loadedSuccessfully: false`).
+ *
+ * DATA-INTEGRITY INVARIANT: serverProfiles (the canonical in-memory cache
+ * every write path reads its "current state" from) is ONLY EVER populated
+ * from a confirmed read (this function's try branch) or a confirmed
+ * Storage.player.set commit (applyDeltaToPlayer, after saveProfile succeeds).
+ * NEVER from the catch branch below. This is what used to be missing: an
+ * earlier version of this function cached an empty fallback profile on a
+ * failed read, which every write path then unknowingly built a
+ * Storage.player.set candidate on top of - permanently overwriting a
+ * player's real persisted Connections with a truncated one the moment
+ * Storage recovered. Not caching the failure fixes this at the one place
+ * that matters, for every write path at once, without changing any of them
+ * individually.
+ *
+ * A direct, useful consequence: a failed load is never remembered, so the
+ * VERY NEXT call for the same address - the next RESULT-tick rescan calling
+ * applyDeltaToPlayer again, or a later requestProfile - automatically
+ * attempts a fresh Storage.player.get, with no separate "retry-eligible"
+ * flag or bookkeeping needed. This is also why every existing retry
+ * mechanism (RESULT-tick rescans, requestProfile-triggered reconciliation)
+ * already suffices - none of them needed to change for this fix.
+ */
+async function loadProfile(address: string): Promise<ProfileLoadOutcome<PersistedSocialQuestProfileV1>> {
     const existing = serverProfiles.get(address)
-    if (existing) return existing
+    if (existing) return { profile: existing, loadedSuccessfully: true } // only ever cached from a confirmed read or a confirmed commit - see this function's own doc comment
 
     const inFlight = loadingInFlight.get(address)
     if (inFlight) return inFlight
 
-    const promise = (async () => {
+    const promise = (async (): Promise<ProfileLoadOutcome<PersistedSocialQuestProfileV1>> => {
         try {
             const raw = await Storage.player.get<unknown>(address, STORAGE_KEY, { fresh: true })
             const profile = raw === null ? emptyProfile() : sanitizeProfile(raw)
-            serverProfiles.set(address, profile)
-            return profile
+            serverProfiles.set(address, profile) // confirmed read (LOADED or MISSING) - safe to cache and safe to write from
+            return { profile, loadedSuccessfully: true }
         } catch (err) {
             console.error(
-                `[Persistence][SERVER] Storage.player.get failed - continuing with an empty profile, session-only for this player: ${
+                `[Persistence][SERVER] Storage.player.get failed - this read is NOT cached and NOT safe to write from; the existing RESULT-tick rescan / requestProfile retry will attempt a fresh read: ${
                     err instanceof Error ? err.message : String(err)
                 }`
             )
-            const profile = emptyProfile()
-            serverProfiles.set(address, profile)
-            return profile
+            // Deliberately NEVER serverProfiles.set() here - see this function's own
+            // data-integrity invariant above. `profile` below is a throwaway value for
+            // tolerant/read-only callers only (e.g. requestProfile's client response) -
+            // never a valid baseline for a write.
+            return { profile: emptyProfile(), loadedSuccessfully: false }
         } finally {
             loadingInFlight.delete(address)
         }
@@ -143,6 +194,15 @@ type ApplyDeltaResult = 'SAVED' | 'ALREADY_PROCESSED' | 'FAILED'
 interface ApplyDeltaOutcome {
     result: ApplyDeltaResult
     crossedMilestones: FriendshipLevelDefinition[]
+    /**
+     * This address's own updated view of the relationship with `otherUserId`,
+     * immediately after a fresh SAVED commit - undefined for ALREADY_PROCESSED/
+     * FAILED (nothing new to report). Feeds Top Matches' pair-level sync (see
+     * processRoundPair/scheduleTopMatchSync) - each side's own sameAnswers/
+     * differentAnswers view IS a valid absolute snapshot for the pair, since a
+     * "same answer" round is the same fact from either side's perspective.
+     */
+    connectionSnapshot?: { sameAnswers: number; differentAnswers: number }
 }
 
 /**
@@ -170,13 +230,24 @@ async function applyDeltaToPlayer(
     /** The OTHER player's display name, as observed by THIS server right now via getPlayer() - already sanitized (non-empty, trimmed) by the caller, or undefined if unresolved this tick. Never a client-claimed value. */
     observedDisplayName: string | undefined
 ): Promise<ApplyDeltaOutcome> {
-    const baseline = await loadProfile(address)
+    const { profile: baseline, loadedSuccessfully } = await loadProfile(address)
+    if (!loadedSuccessfully) {
+        // The Storage.player.get itself failed - `baseline` is a throwaway empty
+        // profile, NOT a confirmed state (see loadProfile's own data-integrity
+        // invariant). Abort without touching Storage or serverProfiles at all: never
+        // increment roundsTogether, never write Connections from this unreliable
+        // baseline. The existing RESULT-tick rescan (scanCurrentRoundForValidPairs)
+        // calls this again on the next tick, which attempts a genuinely fresh read -
+        // a failed load is never cached, so no separate retry bookkeeping is needed.
+        return { result: 'FAILED', crossedMilestones: [] }
+    }
     if (hasProcessedEventId(baseline, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] } // fast path - never even joins the queue
 
     return enqueueWrite(async (): Promise<ApplyDeltaOutcome> => {
         // Re-check against the CURRENT canonical profile, not `baseline` - it may have
         // advanced while this task was waiting its turn (another queued write for this
-        // same player already committed).
+        // same player already committed). Guaranteed present by now: `loadedSuccessfully`
+        // above already confirms serverProfiles.get(address) was populated.
         const current = serverProfiles.get(address) ?? baseline
         if (hasProcessedEventId(current, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] }
 
@@ -204,7 +275,11 @@ async function applyDeltaToPlayer(
         if (!ok) return { result: 'FAILED', crossedMilestones: [] }
 
         serverProfiles.set(address, candidate) // commit - only now does this become the canonical profile
-        return { result: 'SAVED', crossedMilestones: crossedFriendshipMilestones(existing.roundsTogether, record.roundsTogether) }
+        return {
+            result: 'SAVED',
+            crossedMilestones: crossedFriendshipMilestones(existing.roundsTogether, record.roundsTogether),
+            connectionSnapshot: { sameAnswers: record.sameAnswers, differentAnswers: record.differentAnswers }
+        }
     })
 }
 
@@ -261,6 +336,19 @@ async function processRoundPair(
                 userB,
                 outcomeB.crossedMilestones.map((definition) => ({ key: friendshipBonusKey(userA, definition.id), bonusPoints: definition.bonusPoints }))
             )
+        }
+
+        // Top Matches (ALL TIME) - deliberately NOT gated on "only the canonical/
+        // smaller-userId side". EITHER side's own fresh SAVED commit is a valid
+        // absolute snapshot of the pair, and scheduleTopMatchSync's monotonic
+        // merge (see topMatchesManager.ts) guarantees that whichever side is
+        // currently more advanced always wins - never two entries for the same
+        // pair, never a regression if one side is temporarily behind.
+        if (outcomeA.result === 'SAVED' && outcomeA.connectionSnapshot) {
+            scheduleTopMatchSync(userA, userB, outcomeA.connectionSnapshot, nameA, nameB)
+        }
+        if (outcomeB.result === 'SAVED' && outcomeB.connectionSnapshot) {
+            scheduleTopMatchSync(userB, userA, outcomeB.connectionSnapshot, nameB, nameA)
         }
     } catch (err) {
         console.error(`[Persistence][SERVER] Failed to process round ${roundId} pair: ${err instanceof Error ? err.message : String(err)}`)
@@ -346,7 +434,7 @@ function scanCurrentRoundForValidPairs(state: RoundStateValue): void {
 /** In-memory canonical Social Points profile per player, same role/guarantees as serverProfiles above: only ever updated after a queued Storage.player.set() confirms success. */
 const socialPointsProfiles = new Map<string, PersistedSocialPointsProfileV1>()
 /** Addresses currently mid-load, mirrors loadingInFlight above but for this separate domain. */
-const socialPointsLoadingInFlight = new Map<string, Promise<PersistedSocialPointsProfileV1>>()
+const socialPointsLoadingInFlight = new Map<string, Promise<ProfileLoadOutcome<PersistedSocialPointsProfileV1>>>()
 /** Fast-path in-memory record of per-player roundEventIds already handled THIS server process - mirrors processedPairEventsInMemory above, own Set. */
 const processedSocialPointsEventsInMemory = new Set<string>()
 
@@ -394,7 +482,18 @@ interface DueFriendshipBonus {
 async function awardFriendshipBonuses(address: string, dueBonuses: DueFriendshipBonus[]): Promise<boolean> {
     if (dueBonuses.length === 0) return true
 
-    const baseline = await loadSocialPointsProfile(address)
+    const { profile: baseline, loadedSuccessfully } = await loadSocialPointsProfile(address)
+    if (!loadedSuccessfully) {
+        console.error(`[SocialPoints][SERVER] Friendship bonus award for ${address} deferred - Social Points profile failed to load, not writing from an unreliable baseline`)
+        // Same recovery path as the write-failure branch below - queue for the next
+        // tick's retry rather than silently dropping these bonuses. A fresh
+        // loadSocialPointsProfile() attempt on that retry gets a genuinely new read,
+        // since a failed load is never cached (see loadSocialPointsProfile's own doc
+        // comment).
+        reconciledAddresses.delete(address)
+        pendingFriendshipReconciliations.add(address)
+        return false
+    }
     if (dueBonuses.every((bonus) => bonus.key in baseline.awardedFriendshipBonuses)) return true // fast path - never even joins the queue
 
     return enqueueWrite(async (): Promise<boolean> => {
@@ -476,14 +575,30 @@ const pendingFriendshipReconciliations = new Set<string>()
  * profile it already awaited. Safe to run concurrently with the immediate
  * crossing-detection path for the same address - see awardFriendshipBonuses's
  * own doc comment.
+ *
+ * Takes the Connections profile and its load status as PARAMETERS rather than
+ * loading them itself - the caller (requestProfile handler, or
+ * retryFriendshipReconciliationForAddress on the pending-write retry tick)
+ * has always already resolved both, and re-loading here would duplicate a
+ * Storage read that just happened moments earlier (see loadProfile's own doc
+ * comment). If `connectionsLoadedSuccessfully` is false - the read that
+ * produced `connectionsProfile` was a failure fallback, not real data - this
+ * sweep does nothing at all: it neither awards
+ * anything (an empty fallback would look like "no Friendship history",
+ * silently skipping every already-earned bonus) nor marks the address
+ * reconciled, so a later requestProfile (or retry tick) gets a genuine second
+ * attempt instead of being permanently skipped by a false "already done".
  */
-async function reconcileFriendshipBonuses(address: string): Promise<void> {
+async function reconcileFriendshipBonuses(address: string, connectionsProfile: PersistedSocialQuestProfileV1, connectionsLoadedSuccessfully: boolean): Promise<void> {
     if (reconciledAddresses.has(address)) return
     if (reconciliationInFlight.has(address)) return
+    if (!connectionsLoadedSuccessfully) {
+        console.error(`[SocialPoints][SERVER] Friendship bonus reconciliation skipped for ${address} - Connections profile failed to load this attempt, eligible for retry later`)
+        return
+    }
     reconciliationInFlight.add(address)
 
     try {
-        const connectionsProfile = await loadProfile(address)
         const dueBonuses: DueFriendshipBonus[] = []
         for (const [partnerUserId, record] of Object.entries(connectionsProfile.connections)) {
             for (const definition of crossedFriendshipMilestones(0, record.roundsTogether)) {
@@ -502,6 +617,19 @@ async function reconcileFriendshipBonuses(address: string): Promise<void> {
     } finally {
         reconciliationInFlight.delete(address)
     }
+}
+
+/**
+ * Re-derives a fresh Connections load (via loadProfile - a genuinely fresh
+ * attempt if the last one failed, since a failed load is never cached) before
+ * retrying reconcileFriendshipBonuses - used only by
+ * retryPendingFriendshipBonuses below, where genuine time has passed since
+ * the last attempt (a full server tick), unlike the requestProfile handler,
+ * which already has a same-instant profile+status to pass directly.
+ */
+async function retryFriendshipReconciliationForAddress(address: string): Promise<void> {
+    const { profile, loadedSuccessfully } = await loadProfile(address)
+    await reconcileFriendshipBonuses(address, profile, loadedSuccessfully)
 }
 
 /**
@@ -534,32 +662,143 @@ function retryPendingFriendshipBonuses(): void {
     const addresses = [...pendingFriendshipReconciliations]
     pendingFriendshipReconciliations.clear()
     for (const address of addresses) {
-        void reconcileFriendshipBonuses(address)
+        void retryFriendshipReconciliationForAddress(address)
     }
 }
 
-async function loadSocialPointsProfile(address: string): Promise<PersistedSocialPointsProfileV1> {
+/** Addresses whose full Top Matches reconciliation sweep (from persisted Connections) has completed successfully this server process - mirrors reconciledAddresses (Friendship bonuses), own separate Set/domain. Only ever added once the sweep itself ran to completion without throwing - see reconcileTopMatchesForAddress. */
+const reconciledTopMatchAddresses = new Set<string>()
+/** Addresses whose Top Matches sweep is currently running - guards a second concurrent requestProfile for the same address (e.g. a fast reconnect) from redundantly re-scheduling every partner's snapshot while the first sweep is still in flight. Not required for correctness (scheduleTopMatchSync's monotonic merge tolerates redundant calls perfectly safely) - purely to avoid wasted work. Always cleared, success or failure. */
+const topMatchReconciliationInFlight = new Set<string>()
+
+/**
+ * Full historical Top Matches reconciliation for one player, run at most once
+ * successfully per address per server process (reconciledTopMatchAddresses/
+ * topMatchReconciliationInFlight above) - mirrors reconcileFriendshipBonuses'
+ * own shape and role, own separate domain, triggered from the same
+ * requestProfile handler.
+ *
+ * Resolves two things at once, by design:
+ * - BACKFILL: a Connection formed before Top Matches existed never generated
+ *   any global pair entry - the live path (processRoundPair) only fires on a
+ *   FRESH round. This sweep is what lets that pre-existing history enter the
+ *   index, the moment either member of the pair next reconnects.
+ * - RECOVERY: if a live scheduleTopMatchSync's eventual Storage.set was lost
+ *   to a server restart before it flushed (its pending entry only ever lived
+ *   in memory - see topMatchesManager.ts), this sweep re-derives and re-sends
+ *   the exact same absolute snapshot from this player's own already-confirmed
+ *   Connections profile, with no dependency on that specific pair ever
+ *   playing another round.
+ *
+ * NEVER writes to the Top Matches index directly - every partner's snapshot
+ * goes through the exact same scheduleTopMatchSync() the live round path
+ * uses, so it gets the identical pairKey computation, monotonic merge, and
+ * pending/retry handling. This is what makes it safe for BOTH members of a
+ * pair to reconcile the same relationship independently, whenever each of
+ * them next reconnects - scheduleTopMatchSync's max() merge means whichever
+ * sweep (or the live path) has seen the higher counters always wins, never
+ * overwritten by a lower one arriving later, in either order.
+ *
+ * Marked reconciled once every partner has been HANDED to scheduleTopMatchSync
+ * - not once each one's eventual Storage.set has confirmed. That's correct
+ * (not a shortcut): scheduleTopMatchSync is synchronous bookkeeping only (it
+ * updates the in-memory pending map and asks for a flush) - the actual
+ * Storage.set and its retry-on-failure are topMatchesManager.ts's own,
+ * already-proven responsibility, wired independently into every server tick.
+ * The try/catch below is defensive only (nothing inside currently throws,
+ * since the Connections load itself already happened in the caller) - kept
+ * for the same reason reconcileFriendshipBonuses keeps one, and specifically
+ * NOT followed by marking this address reconciled on the (currently
+ * unreachable) failure path, so a later requestProfile would still retry the
+ * whole sweep from scratch if that ever changed.
+ *
+ * Own display name is resolved ONCE via resolveObservedDisplayName and reused
+ * for every partner in the loop - reliable at exactly this moment because
+ * this function is only ever triggered by that same player's OWN
+ * requestProfile message, so they are by definition currently connected (see
+ * this function's call site). The partner's name comes from whatever this
+ * player's own Connections profile already persisted for them
+ * (lastKnownDisplayName) - no new persisted field needed for either side.
+ *
+ * Takes the Connections profile and its load status as PARAMETERS, exactly
+ * like reconcileFriendshipBonuses now does - the requestProfile handler has
+ * already resolved both via loadProfile, so this never re-reads Storage
+ * itself. If `connectionsLoadedSuccessfully` is false, this does
+ * nothing: no partner is scheduled (an empty fallback profile would look
+ * like "this player has no history", silently regressing nothing thanks to
+ * scheduleTopMatchSync's monotonic merge - but it's still pointless work) and
+ * the address is NOT marked reconciled, so a later requestProfile gets a
+ * genuine retry instead of being permanently skipped.
+ */
+async function reconcileTopMatchesForAddress(
+    address: string,
+    connectionsProfile: PersistedSocialQuestProfileV1,
+    connectionsLoadedSuccessfully: boolean
+): Promise<void> {
+    if (reconciledTopMatchAddresses.has(address)) return
+    if (topMatchReconciliationInFlight.has(address)) return
+    if (!connectionsLoadedSuccessfully) {
+        console.error(`[TopMatches][SERVER] Reconciliation skipped for ${address} - Connections profile failed to load this attempt, eligible for retry later`)
+        return
+    }
+    topMatchReconciliationInFlight.add(address)
+
+    try {
+        const ownDisplayName = resolveObservedDisplayName(address)
+
+        for (const [partnerUserId, record] of Object.entries(connectionsProfile.connections)) {
+            scheduleTopMatchSync(
+                address,
+                partnerUserId,
+                { sameAnswers: record.sameAnswers, differentAnswers: record.differentAnswers },
+                ownDisplayName,
+                record.lastKnownDisplayName
+            )
+        }
+
+        reconciledTopMatchAddresses.add(address)
+    } catch (err) {
+        console.error(`[TopMatches][SERVER] Reconciliation failed for ${address} - eligible for retry on a later requestProfile: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+        topMatchReconciliationInFlight.delete(address)
+    }
+}
+
+/**
+ * Loads `address`'s Social Points profile with the same LOADED/MISSING vs
+ * FAILED distinction as loadProfile() (Connections) above - see that
+ * function's own doc comment for the full data-integrity invariant this
+ * enforces: socialPointsProfiles is ONLY EVER populated from a confirmed read
+ * or a confirmed Storage.player.set commit, NEVER from a failed
+ * Storage.player.get's catch branch. Without this, applySocialPointsEvent and
+ * awardFriendshipBonuses would each unknowingly build a write candidate on
+ * top of an empty fallback the moment Storage.player.get failed once,
+ * permanently overwriting validRounds/friendshipBonusPoints/
+ * awardedFriendshipBonuses with a truncated profile as soon as either of
+ * them next wrote - the exact risk this whole function exists to prevent.
+ */
+async function loadSocialPointsProfile(address: string): Promise<ProfileLoadOutcome<PersistedSocialPointsProfileV1>> {
     const existing = socialPointsProfiles.get(address)
-    if (existing) return existing
+    if (existing) return { profile: existing, loadedSuccessfully: true }
 
     const inFlight = socialPointsLoadingInFlight.get(address)
     if (inFlight) return inFlight
 
-    const promise = (async () => {
+    const promise = (async (): Promise<ProfileLoadOutcome<PersistedSocialPointsProfileV1>> => {
         try {
             const raw = await Storage.player.get<unknown>(address, SOCIAL_POINTS_STORAGE_KEY, { fresh: true })
             const profile = raw === null ? emptySocialPointsProfile() : sanitizeSocialPointsProfile(raw)
-            socialPointsProfiles.set(address, profile)
-            return profile
+            socialPointsProfiles.set(address, profile) // confirmed read (LOADED or MISSING) - safe to cache and safe to write from
+            return { profile, loadedSuccessfully: true }
         } catch (err) {
             console.error(
-                `[SocialPoints][SERVER] Storage.player.get failed - continuing with an empty profile, session-only for this player: ${
+                `[SocialPoints][SERVER] Storage.player.get failed - this read is NOT cached and NOT safe to write from; the existing retry mechanisms (RESULT-tick rescan, pending-write retry) will attempt a fresh read: ${
                     err instanceof Error ? err.message : String(err)
                 }`
             )
-            const profile = emptySocialPointsProfile()
-            socialPointsProfiles.set(address, profile)
-            return profile
+            // Deliberately NEVER socialPointsProfiles.set() here - see this function's
+            // own doc comment.
+            return { profile: emptySocialPointsProfile(), loadedSuccessfully: false }
         } finally {
             socialPointsLoadingInFlight.delete(address)
         }
@@ -607,7 +846,16 @@ async function saveSocialPointsProfile(address: string, profile: PersistedSocial
  * Points result.
  */
 async function applySocialPointsEvent(address: string, eventId: string, observedDisplayName: string | undefined): Promise<ApplyDeltaResult> {
-    const baseline = await loadSocialPointsProfile(address)
+    const { profile: baseline, loadedSuccessfully } = await loadSocialPointsProfile(address)
+    if (!loadedSuccessfully) {
+        // The Storage.player.get itself failed - `baseline` is a throwaway empty
+        // profile, NOT a confirmed state. Abort without touching Storage or
+        // socialPointsProfiles: never increment validRounds from this unreliable
+        // baseline. The existing RESULT-tick rescan (scanCurrentRoundForSocialPoints)
+        // calls this again on the next tick with a genuinely fresh read - a failed
+        // load is never cached, so no separate retry bookkeeping is needed.
+        return 'FAILED'
+    }
     if (hasProcessedSocialPointsEventId(baseline, eventId)) {
         return 'ALREADY_PROCESSED' // fast path - never even joins the queue
     }
@@ -710,6 +958,8 @@ export function initPersistenceServer(): void {
     // running, scheduleLeaderboardSync() (called from real Social Points
     // saves that can happen during this same window) only buffers in memory.
     void hydrateLeaderboardCache()
+    // Same reasoning, own separate index - see hydrateTopMatchesCache()'s own doc comment.
+    void hydrateTopMatchesCache()
 
     persistenceRoom.onMessage('requestProfile', async (_data, context) => {
         if (!context) {
@@ -718,16 +968,26 @@ export function initPersistenceServer(): void {
         }
         const address = normalizeUserId(context.from)
         try {
-            const profile = await loadProfile(address)
+            // Reused for BOTH reconciliation sweeps below - this is the one
+            // Storage.player.get for this address this handler ever performs; neither
+            // sweep re-reads it. The client-facing response is unaffected by
+            // loadedSuccessfully - it always gets `profile` (a genuinely empty one on
+            // failure, exactly as before), preserving this handler's existing
+            // tolerant-of-Storage-failure contract - only the internal reconciliation
+            // decision (below) depends on whether the read was actually reliable.
+            const { profile, loadedSuccessfully } = await loadProfile(address)
             persistenceRoom.send(
                 'profileResponse',
                 { found: true, dataJson: JSON.stringify(profile), error: '', serverSessionId: SERVER_SESSION_ID },
                 { to: [context.from] }
             )
-            // Fire-and-forget - never delays or blocks the response above, which only
-            // needs the Connections profile already awaited. See reconcileFriendshipBonuses's
-            // own doc comment.
-            void reconcileFriendshipBonuses(address)
+            // Fire-and-forget - never delays or blocks the response above. See
+            // reconcileFriendshipBonuses's own doc comment for why passing
+            // loadedSuccessfully:false here makes it skip without marking anything
+            // reconciled, instead of misreading an empty fallback as "no history".
+            void reconcileFriendshipBonuses(address, profile, loadedSuccessfully)
+            // Same reasoning, own separate domain - see reconcileTopMatchesForAddress's own doc comment.
+            void reconcileTopMatchesForAddress(address, profile, loadedSuccessfully)
         } catch (err) {
             console.error(`[Persistence][SERVER] requestProfile handling failed: ${err instanceof Error ? err.message : String(err)}`)
             persistenceRoom.send('profileResponse', { found: false, dataJson: '', error: 'load_failed', serverSessionId: SERVER_SESSION_ID }, { to: [context.from] })
@@ -739,13 +999,13 @@ export function initPersistenceServer(): void {
             const state = getRoundState()
             scanCurrentRoundForValidPairs(state)
             scanCurrentRoundForSocialPoints(state)
-            // Both unconditional - NOT gated on RESULT phase like the two scans above.
-            // A pending leaderboard mirror sync or Friendship bonus can still need
-            // retrying long after the RESULT that produced it has ended; see
-            // retryPendingLeaderboardSyncs()'s and retryPendingFriendshipBonuses()'s
-            // own doc comments.
+            // All three unconditional - NOT gated on RESULT phase like the two scans
+            // above. A pending leaderboard mirror sync, Friendship bonus, or Top
+            // Matches sync can still need retrying long after the RESULT that
+            // produced it has ended; see each function's own doc comment.
             retryPendingLeaderboardSyncs()
             retryPendingFriendshipBonuses()
+            retryPendingTopMatchSyncs()
         }, 1000)
     }
 }
