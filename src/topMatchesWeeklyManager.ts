@@ -40,6 +40,8 @@ import { buildRankedTopMatches, clampTopN, TopMatchesSnapshot } from './topMatch
 // -----------------------------------------------------------------------
 
 const TOP_MATCHES_WEEKLY_HYDRATION_PAGE_SIZE = 100
+/** THIS WEEK's own minimum - a pair needs at least this many shared valid answers to appear in the weekly ranking. Deliberately its own product decision, independent of ALL TIME's own (20) - see getTopMatchesThisWeek below, the only caller that applies it. */
+const THIS_WEEK_MIN_SHARED_ANSWERS = 5
 
 /**
  * Canonical in-memory entries, keyed by a COMPOSITE key (`${weekKey}:${pairKey}`)
@@ -312,15 +314,18 @@ function getTopMatchesWeeklyCacheSnapshot(): PersistedTopMatchWeeklyEntryV1[] {
  * Top `limit` pairs for THIS WEEK, reusing topMatchesRanking.ts's
  * buildRankedTopMatches/clampTopN completely unchanged - see this file's own
  * top comment for why PersistedTopMatchWeeklyEntryV1[] is structurally
- * assignable there with no cast. Same hydration-safety contract as ALL
- * TIME's getTopMatches: status:'hydrating' (empty top, totalPairs:0) until
- * the current week's index is confirmed fully loaded.
+ * assignable there with no cast. Applies THIS_WEEK_MIN_SHARED_ANSWERS (5) -
+ * ALL TIME applies its own, different minimum (20) at its own call site in
+ * topMatchesRanking.ts, never a value shared between the two domains. Same
+ * hydration-safety contract as ALL TIME's getTopMatches: status:'hydrating'
+ * (empty top, totalPairs:0) until the current week's index is confirmed
+ * fully loaded.
  */
 export function getTopMatchesThisWeek(limit: number): TopMatchesSnapshot {
     if (!hydrationFullyLoaded) {
         return { status: 'hydrating', totalPairs: 0, top: [] }
     }
 
-    const ranked = buildRankedTopMatches(getTopMatchesWeeklyCacheSnapshot())
+    const ranked = buildRankedTopMatches(getTopMatchesWeeklyCacheSnapshot(), THIS_WEEK_MIN_SHARED_ANSWERS)
     return { status: 'ready', totalPairs: ranked.length, top: ranked.slice(0, clampTopN(limit)) }
 }
