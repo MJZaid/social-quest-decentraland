@@ -19,7 +19,7 @@ import {
 } from './networkPlayerAnswer'
 
 export type Option = 'A' | 'B'
-export type RoundPhase = 'waiting' | 'answering' | 'result'
+export type RoundPhase = 'waiting' | 'countdown' | 'answering' | 'result'
 
 export interface RevealEntry {
     userId: string
@@ -54,6 +54,8 @@ export interface RoundSnapshot {
 
 const ANSWERING_SECONDS = 10
 const RESULT_SECONDS = 3
+/** Pre-round countdown once quorum is met - WAITING/COUNTDOWN only, never between ANSWERING rounds. */
+const COUNTDOWN_SECONDS = 3
 /** How long into RESULT we keep waiting for missing answers before revealing anyway. */
 const REVEAL_TIMEOUT_SECONDS = 1
 /** How many consecutive missed eligible rounds trigger automatic unjoin. */
@@ -68,12 +70,22 @@ function phaseDuration(phase: SharedPhase): number {
 function toLocalPhase(phase: SharedPhase): RoundPhase {
     if (phase === SharedPhase.ANSWERING) return 'answering'
     if (phase === SharedPhase.RESULT) return 'result'
+    if (phase === SharedPhase.COUNTDOWN) return 'countdown'
     return 'waiting'
 }
 
-/** The round relevant to eligibility checks right now: the round in flight, or the one about to start if WAITING. */
+/**
+ * The round relevant to eligibility checks right now: the round in flight, or
+ * the one about to start if WAITING or COUNTDOWN. roundId itself does NOT
+ * advance until COUNTDOWN finishes and ANSWERING actually begins (see
+ * startNewRound) - COUNTDOWN is deliberately just "WAITING with quorum met
+ * and a visible timer" for eligibility purposes, so a player's
+ * eligibleFromRoundId is always evaluated against the same round number
+ * throughout the whole WAITING->COUNTDOWN stretch, never shifted by entering
+ * or being mid-countdown.
+ */
 function relevantRoundId(state: RoundStateValue): number {
-    return state.phase === SharedPhase.WAITING ? state.roundId + 1 : state.roundId
+    return state.phase === SharedPhase.WAITING || state.phase === SharedPhase.COUNTDOWN ? state.roundId + 1 : state.roundId
 }
 
 function buildRevealData(answers: PlayerAnswerValue[]): RevealData {
@@ -156,7 +168,13 @@ class RoundManager {
 
         const state = getRoundState()
         const question = state.questionIndex === NO_QUESTION ? null : QUESTIONS[state.questionIndex]
-        const isActiveNow = getActiveUserIds(state.roundId).includes(myProfile.userId)
+        // relevantRoundId(), not the raw state.roundId: during COUNTDOWN, roundId hasn't
+        // advanced yet (see relevantRoundId's own doc comment), but eligibility must already
+        // be checked against the round that's about to start - otherwise a player who only
+        // just became eligible would wrongly show as "pending" (isPending below) throughout
+        // the countdown they're actually part of. For ANSWERING/RESULT this is a no-op:
+        // relevantRoundId() already returns state.roundId unchanged there.
+        const isActiveNow = getActiveUserIds(relevantRoundId(state)).includes(myProfile.userId)
         // A selection only belongs to the round it was made for. this.selectedOption is only
         // reset to null by the ~1s tick loop (syncLocalBookkeeping), but getSnapshot() can be
         // read by the UI many times per second and state.roundId can already reflect a new
@@ -271,7 +289,22 @@ class RoundManager {
         }
 
         if (state.phase === SharedPhase.WAITING) {
-            this.startNewRound(state)
+            // Quorum just met - start the pre-round countdown instead of the round itself.
+            // roundId is deliberately left untouched here (see relevantRoundId's doc comment).
+            writeRoundState({ ...state, phase: SharedPhase.COUNTDOWN, secondsLeft: COUNTDOWN_SECONDS })
+            return
+        }
+
+        if (state.phase === SharedPhase.COUNTDOWN) {
+            // Dedicated branch, not the generic secondsLeft-- below: transitions to ANSWERING
+            // the instant secondsLeft would hit 1->0, so the UI shows exactly 3/2/1 with no
+            // trailing "0" frame before the question appears (unlike ANSWERING/RESULT's own
+            // countdowns, which do show a final 0 - not changed here, only COUNTDOWN's).
+            if (state.secondsLeft > 1) {
+                writeRoundState({ ...state, secondsLeft: state.secondsLeft - 1 })
+            } else {
+                this.startNewRound(state)
+            }
             return
         }
 
@@ -283,6 +316,7 @@ class RoundManager {
         if (state.phase === SharedPhase.ANSWERING) {
             writeRoundState({ ...state, phase: SharedPhase.RESULT, secondsLeft: RESULT_SECONDS })
         } else {
+            // RESULT finished - straight into the next question, no countdown between rounds.
             this.startNewRound(state)
         }
     }

@@ -20,7 +20,9 @@ const ROUND_STATE_ENTITY_ENUM_ID = 1000
 export enum SharedPhase {
     WAITING = 0,
     ANSWERING = 1,
-    RESULT = 2
+    RESULT = 2,
+    /** Pre-round countdown, quorum already met - see roundManager.ts. Appended, not inserted, to keep the existing values stable. */
+    COUNTDOWN = 3
 }
 
 export interface RoundStateValue {

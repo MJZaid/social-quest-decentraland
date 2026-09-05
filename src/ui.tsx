@@ -211,6 +211,11 @@ const WAITING_TEXT_FONT_SIZE = 22
 const WAITING_TEXT_MARGIN_BOTTOM = 10
 const WAITING_COUNT_FONT_SIZE = 17
 
+/** COUNTDOWN's own text - same fixed, unconditional sizing approach as WAITING above. No animation yet, deliberately - just a big static digit per-tick. */
+const COUNTDOWN_TITLE_FONT_SIZE = 22
+const COUNTDOWN_TITLE_MARGIN_BOTTOM = 12
+const COUNTDOWN_NUMBER_FONT_SIZE = 72
+
 /**
  * The one shared outer panel for ANSWERING, ANSWER LOCKED, and RESULT (see
  * uiMenu's isGameplayPanelPhase gate) - same width/padding/position/title on
@@ -313,14 +318,15 @@ export const uiMenu = () => {
     /** WAITING is the one phase whose outer panel is always the small/compact size, on every platform - see WAITING_PANEL_* constants' doc comment. */
     const isWaitingPhase = round.phase === 'waiting'
     /**
-     * ANSWERING/ANSWER LOCKED/RESULT - the three phases that share the fixed
-     * GAMEPLAY_PANEL_HEIGHT_* shell (see its doc comment). Requires
-     * session.joined: a round already in progress while this player hasn't
+     * COUNTDOWN/ANSWERING/ANSWER LOCKED/RESULT - the phases that share the fixed
+     * GAMEPLAY_PANEL_HEIGHT_* shell (see its doc comment). COUNTDOWN included so the
+     * panel doesn't resize/flicker right before the question it leads straight into.
+     * Requires session.joined: a round already in progress while this player hasn't
      * joined yet renders JoinScreen (via `round.phase !== 'waiting'`, its own
      * "JOIN NEXT ROUND" case), not JoinedGameplay - that JOIN screen keeps its
      * own separate, untouched sizing regardless of round.phase.
      */
-    const isGameplayPanelPhase = session.joined && (round.phase === 'answering' || round.phase === 'result')
+    const isGameplayPanelPhase = session.joined && (round.phase === 'countdown' || round.phase === 'answering' || round.phase === 'result')
     /** Mirrors the exact condition JoinScreen renders under, below - used only to add JOIN_EXTRA_TOP_MARGIN to the panel for that one screen. */
     const showingJoinScreen =
         session.inZone && !session.joined && session.isSafeToJoin && round.afkMessage !== 'removed' && round.afkMessage !== 'warning'
@@ -345,7 +351,7 @@ export const uiMenu = () => {
     // joined: the Agenda must stay openable during WAITING/RESULT for an already-joined
     // player, same as before this fix. Local UI state only; never touches joined status
     // or round lifecycle.
-    if (socialAgendaOpen && (round.phase === 'answering' || (session.inZone && !session.joined))) {
+    if (socialAgendaOpen && ((round.phase === 'answering' || round.phase === 'countdown') || (session.inZone && !session.joined))) {
         socialAgendaOpen = false
     }
     // Phase 2B-4: deliberately NOT the same rule as Social Agenda above.
@@ -354,8 +360,9 @@ export const uiMenu = () => {
     // just because the player is standing in the Quest Zone unjoined
     // (`session.inZone && !session.joined`), even though that means it can
     // sit in front of the JOIN screen while open. It still closes the
-    // instant real gameplay needs the screen, same as Agenda.
-    if (leaderboardOpen && round.phase === 'answering') {
+    // instant real gameplay needs the screen, same as Agenda - now also
+    // including COUNTDOWN, so the pre-round countdown reads clean and visible.
+    if (leaderboardOpen && (round.phase === 'answering' || round.phase === 'countdown')) {
         leaderboardOpen = false
     }
 
@@ -578,6 +585,22 @@ const JoinedGameplay = () => {
                     fontSize={WAITING_COUNT_FONT_SIZE}
                     color={MUTED}
                 />
+            </UiEntity>
+        )
+    }
+
+    if (phase === 'countdown') {
+        return (
+            <UiEntity uiTransform={COLUMN_CENTERED}>
+                <Label
+                    value="SOCIAL QUEST STARTS IN"
+                    fontSize={COUNTDOWN_TITLE_FONT_SIZE}
+                    textAlign="middle-center"
+                    textWrap="wrap"
+                    color={Color4.White()}
+                    uiTransform={{ width: '100%', margin: { bottom: COUNTDOWN_TITLE_MARGIN_BOTTOM } }}
+                />
+                <Label value={`${secondsLeft}`} fontSize={COUNTDOWN_NUMBER_FONT_SIZE} color={Color4.create(1, 0.85, 0.2, 1)} />
             </UiEntity>
         )
     }
@@ -909,8 +932,9 @@ const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
             }}
             uiBackground={{ color: PANEL_BACKGROUND }}
             onMouseDown={() => {
-                // Covers ANSWER LOCKED too - see doc comment above.
-                if (roundManager.getSnapshot().phase === 'answering') return
+                // Covers ANSWER LOCKED and the pre-round COUNTDOWN too - see doc comment above.
+                const phase = roundManager.getSnapshot().phase
+                if (phase === 'answering' || phase === 'countdown') return
                 socialAgendaPage = 0
                 socialAgendaOpen = true
                 leaderboardOpen = false // mutually exclusive centered overlays - see leaderboardOpen's own doc comment
@@ -1079,8 +1103,9 @@ const LeaderboardButton = ({ wide }: { wide: boolean }) => {
             }}
             uiBackground={{ color: PANEL_BACKGROUND }}
             onMouseDown={() => {
-                // Covers ANSWER LOCKED too - same reasoning as SocialAgendaButton above.
-                if (roundManager.getSnapshot().phase === 'answering') return
+                // Covers ANSWER LOCKED and the pre-round COUNTDOWN too - same reasoning as SocialAgendaButton above.
+                const phase = roundManager.getSnapshot().phase
+                if (phase === 'answering' || phase === 'countdown') return
                 leaderboardOpen = true
                 socialAgendaOpen = false // mutually exclusive centered overlays - see leaderboardOpen's own doc comment
                 requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer
