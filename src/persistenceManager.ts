@@ -5,7 +5,7 @@ import { persistenceRoom } from './persistenceMessages'
 import { getRoundState, startRoundStateSync, SharedPhase, RoundStateValue } from './networkRoundState'
 import { getAnswersForRound, AnswerOption } from './networkPlayerAnswer'
 import { hydrateConnections } from './connectionsManager'
-import { acknowledgeLevelWithoutCelebration } from './friendshipManager'
+import { acknowledgeLevelWithoutCelebration, FRIENDSHIP_LEVELS, FriendshipLevelDefinition } from './friendshipManager'
 import {
     PersistedConnectionRecord,
     PersistedSocialQuestProfileV1,
@@ -22,7 +22,8 @@ import {
     emptySocialPointsProfile,
     sanitizeSocialPointsProfile,
     hasProcessedSocialPointsEventId,
-    pushProcessedSocialPointsEventId
+    pushProcessedSocialPointsEventId,
+    friendshipBonusKey
 } from './persistenceSchema'
 import { enqueueWrite } from './storageWriteQueue'
 import { scheduleLeaderboardSync, retryPendingLeaderboardSyncs, hydrateLeaderboardCache } from './leaderboardManager'
@@ -131,6 +132,20 @@ async function saveProfile(address: string, profile: PersistedSocialQuestProfile
 type ApplyDeltaResult = 'SAVED' | 'ALREADY_PROCESSED' | 'FAILED'
 
 /**
+ * Result of one applyDeltaToPlayer() attempt, extended with the Friendship
+ * milestones this specific delta just caused `address` to cross against
+ * `otherUserId` - see crossedFriendshipMilestones(). Only ever non-empty when
+ * result === 'SAVED': an ALREADY_PROCESSED outcome means this exact
+ * pair-round was already fully handled by an earlier attempt (any crossing it
+ * caused was already resolved then), and a FAILED outcome never touched
+ * roundsTogether at all, so neither can have caused a fresh crossing.
+ */
+interface ApplyDeltaOutcome {
+    result: ApplyDeltaResult
+    crossedMilestones: FriendshipLevelDefinition[]
+}
+
+/**
  * Applies one round's delta to a single player's own profile against `otherUserId`,
  * as a queued read-current -> build candidate -> commit-only-on-success transaction.
  * The canonical in-memory profile (serverProfiles) is never mutated optimistically -
@@ -154,16 +169,16 @@ async function applyDeltaToPlayer(
     eventId: string,
     /** The OTHER player's display name, as observed by THIS server right now via getPlayer() - already sanitized (non-empty, trimmed) by the caller, or undefined if unresolved this tick. Never a client-claimed value. */
     observedDisplayName: string | undefined
-): Promise<ApplyDeltaResult> {
+): Promise<ApplyDeltaOutcome> {
     const baseline = await loadProfile(address)
-    if (hasProcessedEventId(baseline, eventId)) return 'ALREADY_PROCESSED' // fast path - never even joins the queue
+    if (hasProcessedEventId(baseline, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] } // fast path - never even joins the queue
 
-    return enqueueWrite(async (): Promise<ApplyDeltaResult> => {
+    return enqueueWrite(async (): Promise<ApplyDeltaOutcome> => {
         // Re-check against the CURRENT canonical profile, not `baseline` - it may have
         // advanced while this task was waiting its turn (another queued write for this
         // same player already committed).
         const current = serverProfiles.get(address) ?? baseline
-        if (hasProcessedEventId(current, eventId)) return 'ALREADY_PROCESSED'
+        if (hasProcessedEventId(current, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] }
 
         const existing = current.connections[otherUserId] ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
         const record: PersistedConnectionRecord = {
@@ -186,10 +201,10 @@ async function applyDeltaToPlayer(
         // saveProfile() already logs a clear error on failure (returned false or threw) -
         // nothing further to log here on the failure path.
         const ok = await saveProfile(address, candidate)
-        if (!ok) return 'FAILED'
+        if (!ok) return { result: 'FAILED', crossedMilestones: [] }
 
         serverProfiles.set(address, candidate) // commit - only now does this become the canonical profile
-        return 'SAVED'
+        return { result: 'SAVED', crossedMilestones: crossedFriendshipMilestones(existing.roundsTogether, record.roundsTogether) }
     })
 }
 
@@ -216,17 +231,35 @@ async function processRoundPair(
     if (processedPairEventsInMemory.has(eventId)) return
 
     try {
-        const [resultA, resultB] = await Promise.all([
+        const [outcomeA, outcomeB] = await Promise.all([
             applyDeltaToPlayer(userA, userB, same, eventId, nameB), // A's record ABOUT B stores B's name
             applyDeltaToPlayer(userB, userA, same, eventId, nameA) // B's record ABOUT A stores A's name
         ])
-        const doneA = resultA === 'SAVED' || resultA === 'ALREADY_PROCESSED'
-        const doneB = resultB === 'SAVED' || resultB === 'ALREADY_PROCESSED'
+        const doneA = outcomeA.result === 'SAVED' || outcomeA.result === 'ALREADY_PROCESSED'
+        const doneB = outcomeB.result === 'SAVED' || outcomeB.result === 'ALREADY_PROCESSED'
         if (doneA && doneB) {
             processedPairEventsInMemory.add(eventId)
         } else {
             console.error(
-                `[Persistence][SERVER] Pair ${userA} <-> ${userB} (round ${roundId}) not fully persisted yet (A=${resultA}, B=${resultB}) - will retry on a later RESULT tick`
+                `[Persistence][SERVER] Pair ${userA} <-> ${userB} (round ${roundId}) not fully persisted yet (A=${outcomeA.result}, B=${outcomeB.result}) - will retry on a later RESULT tick`
+            )
+        }
+
+        // Friendship bonuses - own separate write queue entries, fire-and-forget so a
+        // slow/failed bonus write never delays marking this pair processed above. Safe
+        // to run concurrently with a reconciliation sweep for either address - see
+        // awardFriendshipBonuses's own doc comment for why the two can never double-pay
+        // the same milestone.
+        if (outcomeA.crossedMilestones.length > 0) {
+            void awardFriendshipBonuses(
+                userA,
+                outcomeA.crossedMilestones.map((definition) => ({ key: friendshipBonusKey(userB, definition.id), bonusPoints: definition.bonusPoints }))
+            )
+        }
+        if (outcomeB.crossedMilestones.length > 0) {
+            void awardFriendshipBonuses(
+                userB,
+                outcomeB.crossedMilestones.map((definition) => ({ key: friendshipBonusKey(userA, definition.id), bonusPoints: definition.bonusPoints }))
             )
         }
     } catch (err) {
@@ -317,6 +350,194 @@ const socialPointsLoadingInFlight = new Map<string, Promise<PersistedSocialPoint
 /** Fast-path in-memory record of per-player roundEventIds already handled THIS server process - mirrors processedPairEventsInMemory above, own Set. */
 const processedSocialPointsEventsInMemory = new Set<string>()
 
+/**
+ * Every Friendship milestone crossed by roundsTogether going from `previous`
+ * to `current` (current > previous) - i.e. every FRIENDSHIP_LEVELS definition
+ * whose threshold satisfies previous < minRounds <= current. Used both by the
+ * immediate single-partner check (applyDeltaToPlayer, where a round only ever
+ * advances roundsTogether by 1, so at most one crossing) and by the full
+ * reconciliation sweep (reconcileFriendshipBonuses, where `previous` is always
+ * 0 - every threshold already reached becomes "crossed" at once, which is what
+ * makes historical bonuses retroactive by product decision).
+ */
+function crossedFriendshipMilestones(previousRoundsTogether: number, currentRoundsTogether: number): FriendshipLevelDefinition[] {
+    return FRIENDSHIP_LEVELS.filter((definition) => previousRoundsTogether < definition.minRounds && currentRoundsTogether >= definition.minRounds)
+}
+
+/** One Friendship milestone bonus a player may be due, resolved by the caller (applyDeltaToPlayer's crossing check or reconcileFriendshipBonuses' full sweep) - never trusted past the queued re-check inside awardFriendshipBonuses below. */
+interface DueFriendshipBonus {
+    key: string
+    bonusPoints: number
+}
+
+/**
+ * Grants every bonus in `dueBonuses` that this player's CURRENT canonical
+ * Social Points profile hasn't already recorded, as a single queued
+ * read-check-write transaction - same shape as applySocialPointsEvent,
+ * generalized to N milestones at once (a full reconciliation sweep can find
+ * several due bonuses for one player in one pass; a live crossing typically
+ * finds one). Re-checks awardedFriendshipBonuses against the CURRENT profile,
+ * never a snapshot taken before this was enqueued - so this can safely be
+ * called concurrently from both the immediate crossing-detection path
+ * (processRoundPair) and a full reconciliation sweep
+ * (reconcileFriendshipBonuses) for the same address without ever double-paying
+ * the same key: whichever call's turn in the shared write queue comes first
+ * wins and marks the key, the other sees it already recorded and no-ops for
+ * it. On failure, nothing about this player's state changes at all - not
+ * friendshipBonusPoints, not awardedFriendshipBonuses - so any future
+ * crossing or reconciliation sweep is free to retry the still-missing keys
+ * from scratch. Returns false only when a write was actually attempted and
+ * failed - true for "nothing was due" and for a confirmed save, so callers
+ * that need to know whether it's now safe to stop retrying (reconcileFriendshipBonuses)
+ * can tell the difference from "there was nothing to do".
+ */
+async function awardFriendshipBonuses(address: string, dueBonuses: DueFriendshipBonus[]): Promise<boolean> {
+    if (dueBonuses.length === 0) return true
+
+    const baseline = await loadSocialPointsProfile(address)
+    if (dueBonuses.every((bonus) => bonus.key in baseline.awardedFriendshipBonuses)) return true // fast path - never even joins the queue
+
+    return enqueueWrite(async (): Promise<boolean> => {
+        const current = socialPointsProfiles.get(address) ?? baseline
+        const stillDue = dueBonuses.filter((bonus) => !(bonus.key in current.awardedFriendshipBonuses))
+        if (stillDue.length === 0) return true
+
+        const awardedFriendshipBonuses = { ...current.awardedFriendshipBonuses }
+        let addedPoints = 0
+        for (const bonus of stillDue) {
+            awardedFriendshipBonuses[bonus.key] = true
+            addedPoints += bonus.bonusPoints
+        }
+
+        // A fresh object tree - current/socialPointsProfiles is never touched unless this commits below.
+        const candidate: PersistedSocialPointsProfileV1 = {
+            version: current.version,
+            validRounds: current.validRounds,
+            friendshipBonusPoints: current.friendshipBonusPoints + addedPoints,
+            awardedFriendshipBonuses,
+            recentProcessedEventIds: current.recentProcessedEventIds
+        }
+
+        const ok = await saveSocialPointsProfile(address, candidate)
+        if (!ok) {
+            console.error(`[SocialPoints][SERVER] Failed to save ${stillDue.length} Friendship bonus(es) for ${address} - will retry on a later tick`)
+            // This write may have been the one reconcileFriendshipBonuses was counting on
+            // to mark `address` fully reconciled - un-mark it so a stale "already
+            // reconciled" flag can never suppress the retry this failure needs.
+            // Queuing it here (rather than only relying on a future requestProfile) is
+            // what lets recovery happen while this server process stays alive, with no
+            // reconnect and no restart required - see retryPendingFriendshipBonuses.
+            reconciledAddresses.delete(address)
+            pendingFriendshipReconciliations.add(address)
+            return false
+        }
+
+        socialPointsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+        return true
+    })
+}
+
+/** Addresses whose full historical Friendship-bonus reconciliation sweep has completed successfully this server process - see reconcileFriendshipBonuses. Only ever added on a confirmed success, never on failure, so a recoverable Storage error doesn't permanently block retrying for the rest of this process's lifetime. */
+const reconciledAddresses = new Set<string>()
+/** Addresses whose sweep is currently running - guards a second concurrent requestProfile for the same address (e.g. a fast reconnect) from starting a redundant sweep while the first is still in flight. Always cleared, success or failure. */
+const reconciliationInFlight = new Set<string>()
+/**
+ * Addresses with at least one failed awardFriendshipBonuses write, to retry on
+ * a later tick while this server process stays alive - mirrors
+ * leaderboardManager.ts's own pendingLeaderboardSyncs retry pattern. Populated
+ * only by awardFriendshipBonuses' own failure branch above; never itself a
+ * source of truth for what's owed - retryPendingFriendshipBonuses always
+ * re-derives that from the player's persisted Connections + Social Points
+ * profiles via a fresh reconcileFriendshipBonuses call, never from whatever
+ * dueBonuses the original failed attempt happened to be carrying.
+ */
+const pendingFriendshipReconciliations = new Set<string>()
+
+/**
+ * Full historical reconciliation for one player, run at most once successfully
+ * per address per server process (reconciledAddresses/reconciliationInFlight
+ * above). Makes Friendship bonuses retroactive for a player whose Connections
+ * history already passed a threshold before this bonus existed, or whose bonus
+ * was missed by a failed write on the immediate crossing-detection path
+ * (processRoundPair) and never retried because that exact pair happened not to
+ * play another round together since.
+ *
+ * Reads the player's OWN two profiles only - Connections (roundsTogether per
+ * partner) and Social Points (awardedFriendshipBonuses) - via the SAME address,
+ * never another player's data, so there is no cross-player dependency here at
+ * all. For every partner, every milestone already reached (previous=0, so
+ * everything up to the partner's current roundsTogether) that isn't yet in
+ * awardedFriendshipBonuses is queued as due - this is what makes a long
+ * pre-existing history (e.g. 67 roundsTogether with no bonuses recorded yet)
+ * pay out every already-earned milestone at once, permanently.
+ *
+ * Deliberately fire-and-forget from its caller (the requestProfile handler) -
+ * never blocks or delays that response, which only needs the Connections
+ * profile it already awaited. Safe to run concurrently with the immediate
+ * crossing-detection path for the same address - see awardFriendshipBonuses's
+ * own doc comment.
+ */
+async function reconcileFriendshipBonuses(address: string): Promise<void> {
+    if (reconciledAddresses.has(address)) return
+    if (reconciliationInFlight.has(address)) return
+    reconciliationInFlight.add(address)
+
+    try {
+        const connectionsProfile = await loadProfile(address)
+        const dueBonuses: DueFriendshipBonus[] = []
+        for (const [partnerUserId, record] of Object.entries(connectionsProfile.connections)) {
+            for (const definition of crossedFriendshipMilestones(0, record.roundsTogether)) {
+                dueBonuses.push({ key: friendshipBonusKey(partnerUserId, definition.id), bonusPoints: definition.bonusPoints })
+            }
+        }
+
+        const saved = await awardFriendshipBonuses(address, dueBonuses)
+        if (saved) {
+            reconciledAddresses.add(address) // only marked done once the sweep's own write (if any) actually confirmed
+        } else {
+            console.error(`[SocialPoints][SERVER] Friendship bonus reconciliation for ${address} did not fully save - eligible for retry on a later requestProfile`)
+        }
+    } catch (err) {
+        console.error(`[SocialPoints][SERVER] Friendship bonus reconciliation failed for ${address} - eligible for retry on a later requestProfile: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+        reconciliationInFlight.delete(address)
+    }
+}
+
+/**
+ * Retries every address flagged by a failed awardFriendshipBonuses write, once
+ * per server tick (same 1s cadence as retryPendingLeaderboardSyncs and the
+ * RESULT scans - see initPersistenceServer) - this is the automatic-recovery
+ * half of the failure path above, so a transient Storage outage never needs a
+ * server restart (or even that player reconnecting) to resolve itself.
+ *
+ * Drains the pending set into a local snapshot BEFORE retrying, rather than
+ * checking membership after each attempt - a retry that fails re-adds its own
+ * address via awardFriendshipBonuses' failure branch, so this never loses
+ * track of a still-failing address, and never needs to distinguish "still
+ * pending" from "freshly failed again" itself. Never throws, never grows
+ * unbounded, and never fires more than once per tick even if Storage stays
+ * down indefinitely - the same natural, non-aggressive cadence every other
+ * retry in this file already relies on.
+ *
+ * Each retry re-runs the FULL reconcileFriendshipBonuses sweep for that
+ * address rather than replaying the specific bonus that failed - it re-derives
+ * what's due entirely from the player's own persisted Connections and Social
+ * Points profiles, never from the transient crossing data that triggered the
+ * original attempt, so a retry is exactly as correct as a fresh reconnect
+ * would have been. reconcileFriendshipBonuses' own reconciliationInFlight
+ * guard already prevents two concurrent attempts for the same address, so this
+ * never needs its own separate one.
+ */
+function retryPendingFriendshipBonuses(): void {
+    if (pendingFriendshipReconciliations.size === 0) return
+    const addresses = [...pendingFriendshipReconciliations]
+    pendingFriendshipReconciliations.clear()
+    for (const address of addresses) {
+        void reconcileFriendshipBonuses(address)
+    }
+}
+
 async function loadSocialPointsProfile(address: string): Promise<PersistedSocialPointsProfileV1> {
     const existing = socialPointsProfiles.get(address)
     if (existing) return existing
@@ -403,6 +624,8 @@ async function applySocialPointsEvent(address: string, eventId: string, observed
         const candidate: PersistedSocialPointsProfileV1 = {
             version: current.version,
             validRounds: current.validRounds + 1,
+            friendshipBonusPoints: current.friendshipBonusPoints,
+            awardedFriendshipBonuses: current.awardedFriendshipBonuses,
             recentProcessedEventIds: [...current.recentProcessedEventIds]
         }
         pushProcessedSocialPointsEventId(candidate, eventId)
@@ -501,6 +724,10 @@ export function initPersistenceServer(): void {
                 { found: true, dataJson: JSON.stringify(profile), error: '', serverSessionId: SERVER_SESSION_ID },
                 { to: [context.from] }
             )
+            // Fire-and-forget - never delays or blocks the response above, which only
+            // needs the Connections profile already awaited. See reconcileFriendshipBonuses's
+            // own doc comment.
+            void reconcileFriendshipBonuses(address)
         } catch (err) {
             console.error(`[Persistence][SERVER] requestProfile handling failed: ${err instanceof Error ? err.message : String(err)}`)
             persistenceRoom.send('profileResponse', { found: false, dataJson: '', error: 'load_failed', serverSessionId: SERVER_SESSION_ID }, { to: [context.from] })
@@ -512,11 +739,13 @@ export function initPersistenceServer(): void {
             const state = getRoundState()
             scanCurrentRoundForValidPairs(state)
             scanCurrentRoundForSocialPoints(state)
-            // Unconditional - NOT gated on RESULT phase like the two scans above.
-            // A pending leaderboard mirror sync can still need retrying long after
-            // the RESULT that produced it has ended; see retryPendingLeaderboardSyncs()'s
-            // own doc comment.
+            // Both unconditional - NOT gated on RESULT phase like the two scans above.
+            // A pending leaderboard mirror sync or Friendship bonus can still need
+            // retrying long after the RESULT that produced it has ended; see
+            // retryPendingLeaderboardSyncs()'s and retryPendingFriendshipBonuses()'s
+            // own doc comments.
             retryPendingLeaderboardSyncs()
+            retryPendingFriendshipBonuses()
         }, 1000)
     }
 }

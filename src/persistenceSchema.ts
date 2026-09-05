@@ -150,6 +150,16 @@ export function hasProcessedEventId(profile: PersistedSocialQuestProfileV1, even
 export interface PersistedSocialPointsProfileV1 {
     version: 1
     validRounds: number
+    /** Sum of every Friendship milestone bonus already awarded to this player - incremented in the exact same write as marking the milestone in awardedFriendshipBonuses (see persistenceManager.ts's awardFriendshipBonuses), never recomputed from that map. */
+    friendshipBonusPoints: number
+    /**
+     * Every Friendship milestone bonus already paid to this player, keyed by
+     * friendshipBonusKey() below - permanent, never pruned (unlike
+     * recentProcessedEventIds), since a milestone bonus must never be
+     * re-evaluated as "not yet awarded" once granted. See persistenceManager.ts's
+     * reconcileFriendshipBonuses/awardFriendshipBonuses.
+     */
+    awardedFriendshipBonuses: Record<string, true>
     /** Bounded circular buffer of already-applied per-player roundEventIds - see persistenceManager.ts. Never a full history log, and never the same list Connections uses. */
     recentProcessedEventIds: string[]
 }
@@ -160,7 +170,7 @@ export const SOCIAL_POINTS_STORAGE_KEY = 'socialQuestPointsProfileV1'
 export const MAX_RECENT_SOCIAL_POINTS_EVENT_IDS = 100
 
 export function emptySocialPointsProfile(): PersistedSocialPointsProfileV1 {
-    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds: 0, recentProcessedEventIds: [] }
+    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds: 0, friendshipBonusPoints: 0, awardedFriendshipBonuses: {}, recentProcessedEventIds: [] }
 }
 
 /**
@@ -176,6 +186,20 @@ export function sanitizeSocialPointsProfile(raw: unknown): PersistedSocialPoints
     if (value.version !== SOCIAL_POINTS_SCHEMA_VERSION) return emptySocialPointsProfile()
 
     const validRounds = isFiniteNonNegativeInt(value.validRounds) ? value.validRounds : 0
+    // Absent/invalid (including any V1 profile persisted before this field existed)
+    // sanitizes to 0 - a perfectly valid state for a player with no Friendship
+    // bonuses yet, never treated as corruption.
+    const friendshipBonusPoints = isFiniteNonNegativeInt(value.friendshipBonusPoints) ? value.friendshipBonusPoints : 0
+
+    // Same "absent is valid" treatment as friendshipBonusPoints above - only the
+    // key's presence matters (a milestone is either awarded or it isn't), so any
+    // non-string/empty key is dropped rather than rejecting the whole profile.
+    const awardedFriendshipBonuses: Record<string, true> = {}
+    if (value.awardedFriendshipBonuses && typeof value.awardedFriendshipBonuses === 'object') {
+        for (const key of Object.keys(value.awardedFriendshipBonuses as Record<string, unknown>)) {
+            if (key.length > 0) awardedFriendshipBonuses[key] = true
+        }
+    }
 
     let recentProcessedEventIds: string[] = []
     if (Array.isArray(value.recentProcessedEventIds)) {
@@ -184,7 +208,7 @@ export function sanitizeSocialPointsProfile(raw: unknown): PersistedSocialPoints
             .slice(-MAX_RECENT_SOCIAL_POINTS_EVENT_IDS)
     }
 
-    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds, recentProcessedEventIds }
+    return { version: SOCIAL_POINTS_SCHEMA_VERSION, validRounds, friendshipBonusPoints, awardedFriendshipBonuses, recentProcessedEventIds }
 }
 
 /** Appends an event id, keeping the buffer bounded - a circular window via slice, never a full unbounded log. Own list, own function - never Connections' pushProcessedEventId. */
@@ -197,6 +221,27 @@ export function pushProcessedSocialPointsEventId(profile: PersistedSocialPointsP
 
 export function hasProcessedSocialPointsEventId(profile: PersistedSocialPointsProfileV1, eventId: string): boolean {
     return profile.recentProcessedEventIds.includes(eventId)
+}
+
+/**
+ * Canonical, stable key for one Friendship milestone bonus within a Social
+ * Points profile's awardedFriendshipBonuses - `${partnerUserId}:${milestoneId}`.
+ * `milestoneId` is friendshipManager.ts's FriendshipLevelDefinition.id,
+ * deliberately never the display label (FriendshipLevel), so a future
+ * re-wording of a level's visible name can never orphan or duplicate an
+ * already-awarded bonus. `partnerUserId` is normalized HERE (not left to each
+ * caller, unlike sortedPairKey above) specifically so `0xABC:SPARK` and
+ * `0xabc:SPARK` can never be recorded as two different bonuses - this is the
+ * one and only place this key is ever constructed, so normalizing centrally
+ * here is strictly safer than trusting every call site to have already done it.
+ */
+export function friendshipBonusKey(partnerUserId: string, milestoneId: string): string {
+    return `${normalizeUserId(partnerUserId)}:${milestoneId}`
+}
+
+/** Total Social Points shown to a player - validRounds (one per valid A/B answer) plus every Friendship milestone bonus already awarded. Both inputs are pure counters already carried on the profile; this adds them, nothing more. Deliberately a NEW function, not a change to getSocialPoints above - the leaderboard still calls the old tier-based formula until it's migrated separately. */
+export function getTotalSocialPoints(validRounds: number, friendshipBonusPoints: number): number {
+    return validRounds + friendshipBonusPoints
 }
 
 /** Pure, UI-facing snapshot derived from validRounds alone - never persisted itself, so leaderboard/UI code (later phases) always reads the same single definition of these numbers. */

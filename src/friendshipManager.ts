@@ -16,22 +16,36 @@ export interface FriendshipLevelUpEvent {
     roundsTogether: number
 }
 
-interface FriendshipLevelDefinition {
+/**
+ * Stable, persistent identifier for a Friendship milestone - deliberately
+ * distinct from `FriendshipLevel`'s display text (see persistenceManager.ts's
+ * friendshipBonusKey/awardFriendshipBonuses). A Social Points bonus is recorded
+ * forever under this id; if the visible label is ever re-worded ("FAMILIAR
+ * FACE" -> something else), an id-based key means already-awarded bonuses are
+ * never orphaned and never re-triggered.
+ */
+export type FriendshipMilestoneId = 'NEW_CONNECTION' | 'SPARK' | 'FAMILIAR_FACE' | 'FRIENDS' | 'CLOSE_FRIENDS' | 'COSMIC_BOND' | 'FRIENDS_FOREVER'
+
+export interface FriendshipLevelDefinition {
     /** Ordering key - level-up detection compares this, never the display string. */
     rank: number
     minRounds: number
     level: FriendshipLevel
+    /** Persistent identifier for this milestone - see FriendshipMilestoneId. */
+    id: FriendshipMilestoneId
+    /** One-time Social Points bonus awarded the first time a pair crosses this threshold - see persistenceManager.ts. */
+    bonusPoints: number
 }
 
 /** Ascending by minRounds/rank. CONSTELLATION is deliberately absent - reserved for a future global unique-connections system. */
-const FRIENDSHIP_LEVELS: FriendshipLevelDefinition[] = [
-    { rank: 0, minRounds: 1, level: 'NEW CONNECTION' },
-    { rank: 1, minRounds: 20, level: 'SPARK' },
-    { rank: 2, minRounds: 50, level: 'FAMILIAR FACE' },
-    { rank: 3, minRounds: 100, level: 'FRIENDS' },
-    { rank: 4, minRounds: 200, level: 'CLOSE FRIENDS' },
-    { rank: 5, minRounds: 500, level: 'COSMIC BOND' },
-    { rank: 6, minRounds: 1000, level: 'FRIENDS FOREVER' }
+export const FRIENDSHIP_LEVELS: FriendshipLevelDefinition[] = [
+    { rank: 0, minRounds: 1, level: 'NEW CONNECTION', id: 'NEW_CONNECTION', bonusPoints: 25 },
+    { rank: 1, minRounds: 20, level: 'SPARK', id: 'SPARK', bonusPoints: 50 },
+    { rank: 2, minRounds: 50, level: 'FAMILIAR FACE', id: 'FAMILIAR_FACE', bonusPoints: 75 },
+    { rank: 3, minRounds: 100, level: 'FRIENDS', id: 'FRIENDS', bonusPoints: 100 },
+    { rank: 4, minRounds: 200, level: 'CLOSE FRIENDS', id: 'CLOSE_FRIENDS', bonusPoints: 150 },
+    { rank: 5, minRounds: 500, level: 'COSMIC BOND', id: 'COSMIC_BOND', bonusPoints: 500 },
+    { rank: 6, minRounds: 1000, level: 'FRIENDS FOREVER', id: 'FRIENDS_FOREVER', bonusPoints: 1500 }
 ]
 
 function getLevelDefinition(roundsTogether: number): FriendshipLevelDefinition | null {
