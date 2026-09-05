@@ -7,6 +7,7 @@ import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
 import { getTotalConnections, getDisplayNameFor, getAllConnections } from './connectionsManager'
 import { getFriendshipLevel } from './friendshipManager'
+import { getCompatibility, getSharedValidAnswers } from './compatibilityManager'
 import {
     getPresentedCelebration,
     PresentedNewConnectionCelebration,
@@ -952,6 +953,25 @@ const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
 }
 
 /**
+ * Presentation-only threshold on top of compatibilityManager's pure
+ * getCompatibility()/getSharedValidAnswers() - the core stays a plain
+ * null-or-percentage calculation with no concept of "too little data to
+ * show a number yet"; that judgment call belongs here, in the one place
+ * that renders it. A real percentage only appears at 5+ shared valid
+ * answers - below that, a single shared question could read as a
+ * misleadingly solid 100%/0%.
+ */
+const AFFINITY_MIN_SHARED_ANSWERS = 5
+
+function affinityLabel(sameAnswers: number, differentAnswers: number): string {
+    const shared = getSharedValidAnswers(sameAnswers, differentAnswers)
+    if (shared === 0) return 'NO AFFINITY DATA'
+    if (shared < AFFINITY_MIN_SHARED_ANSWERS) return 'GETTING TO KNOW EACH OTHER...'
+    const compatibility = getCompatibility(sameAnswers, differentAnswers) as number // non-null: shared > 0 here
+    return `${Math.round(compatibility)}% AFFINITY · ${shared} SHARED ANSWER${shared === 1 ? '' : 'S'}`
+}
+
+/**
  * Full-list overlay - opened via SocialAgendaButton (see uiMenu). Reads
  * connectionsManager's existing getAllConnections()
  * directly - no second list of
@@ -1030,6 +1050,12 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             return (
                                 <UiEntity key={connection.otherUserId} uiTransform={{ width: '100%', flexDirection: 'column', margin: { bottom: 12 } }}>
                                     <Label value={name} fontSize={20} color={Color4.White()} />
+                                    <Label
+                                        value={affinityLabel(connection.sameAnswers, connection.differentAnswers)}
+                                        fontSize={16}
+                                        color={Color4.create(1, 0.75, 0.9, 1)}
+                                        textWrap="wrap"
+                                    />
                                     {level !== null && (
                                         <Label
                                             value={`✦ ${level} · ${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
