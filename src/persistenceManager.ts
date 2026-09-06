@@ -5,6 +5,7 @@ import { persistenceRoom } from './persistenceMessages'
 import { getRoundState, startRoundStateSync, SharedPhase, RoundStateValue } from './networkRoundState'
 import { getAnswersForRound, AnswerOption } from './networkPlayerAnswer'
 import { hydrateConnections } from './connectionsManager'
+import { hydrateUnseenConnections } from './socialNotificationsManager'
 import { acknowledgeLevelWithoutCelebration, FRIENDSHIP_LEVELS, FriendshipLevelDefinition } from './friendshipManager'
 import {
     PersistedConnectionRecord,
@@ -23,7 +24,13 @@ import {
     sanitizeSocialPointsProfile,
     hasProcessedSocialPointsEventId,
     pushProcessedSocialPointsEventId,
-    friendshipBonusKey
+    friendshipBonusKey,
+    PersistedSocialNotificationsProfileV1,
+    SOCIAL_NOTIFICATIONS_STORAGE_KEY,
+    emptySocialNotificationsProfile,
+    sanitizeSocialNotificationsProfile,
+    sanitizeConnectionIdList,
+    MAX_MARK_SEEN_IDS_PER_REQUEST
 } from './persistenceSchema'
 import { enqueueWrite } from './storageWriteQueue'
 import { scheduleLeaderboardSync, retryPendingLeaderboardSyncs, hydrateLeaderboardCache } from './leaderboardManager'
@@ -244,6 +251,19 @@ interface ApplyDeltaOutcome {
      * "same answer" round is the same fact from either side's perspective.
      */
     connectionSnapshot?: { sameAnswers: number; differentAnswers: number }
+    /**
+     * True only when this exact commit is the FIRST time `address` has ever
+     * had a Connection with `otherUserId` - captured from whether
+     * current.connections[otherUserId] was undefined BEFORE this delta built
+     * its `existing` fallback, never a change to Connections' own semantics.
+     * Only ever meaningful (and only ever true) alongside result === 'SAVED' -
+     * ALREADY_PROCESSED means an earlier attempt already reported this, and
+     * FAILED never touched roundsTogether at all. This is the ONE and ONLY
+     * signal processRoundPair uses to feed Social Notifications' unseen list
+     * (addUnseenConnection below) - hydration/reconciliation never call this
+     * function at all, so they structurally can never produce a false isNew.
+     */
+    isNew: boolean
 }
 
 /**
@@ -280,9 +300,9 @@ async function applyDeltaToPlayer(
         // baseline. The existing RESULT-tick rescan (scanCurrentRoundForValidPairs)
         // calls this again on the next tick, which attempts a genuinely fresh read -
         // a failed load is never cached, so no separate retry bookkeeping is needed.
-        return { result: 'FAILED', crossedMilestones: [] }
+        return { result: 'FAILED', crossedMilestones: [], isNew: false }
     }
-    if (hasProcessedEventId(baseline, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] } // fast path - never even joins the queue
+    if (hasProcessedEventId(baseline, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [], isNew: false } // fast path - never even joins the queue
 
     return enqueueWrite(async (): Promise<ApplyDeltaOutcome> => {
         // Re-check against the CURRENT canonical profile, not `baseline` - it may have
@@ -290,8 +310,14 @@ async function applyDeltaToPlayer(
         // same player already committed). Guaranteed present by now: `loadedSuccessfully`
         // above already confirms serverProfiles.get(address) was populated.
         const current = serverProfiles.get(address) ?? baseline
-        if (hasProcessedEventId(current, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [] }
+        if (hasProcessedEventId(current, eventId)) return { result: 'ALREADY_PROCESSED', crossedMilestones: [], isNew: false }
 
+        // Captured BEFORE the `existing` fallback below papers over "no record yet"
+        // with a zeroed placeholder - this is the one and only moment this delta can
+        // tell "brand new partner" apart from "existing partner, one more round". See
+        // ApplyDeltaOutcome.isNew's own doc comment for why this never changes
+        // Connections' own semantics.
+        const isNewOnServer = current.connections[otherUserId] === undefined
         const existing = current.connections[otherUserId] ?? { roundsTogether: 0, sameAnswers: 0, differentAnswers: 0 }
         const record: PersistedConnectionRecord = {
             roundsTogether: existing.roundsTogether + 1,
@@ -313,13 +339,14 @@ async function applyDeltaToPlayer(
         // saveProfile() already logs a clear error on failure (returned false or threw) -
         // nothing further to log here on the failure path.
         const ok = await saveProfile(address, candidate)
-        if (!ok) return { result: 'FAILED', crossedMilestones: [] }
+        if (!ok) return { result: 'FAILED', crossedMilestones: [], isNew: false }
 
         serverProfiles.set(address, candidate) // commit - only now does this become the canonical profile
         return {
             result: 'SAVED',
             crossedMilestones: crossedFriendshipMilestones(existing.roundsTogether, record.roundsTogether),
-            connectionSnapshot: { sameAnswers: record.sameAnswers, differentAnswers: record.differentAnswers }
+            connectionSnapshot: { sameAnswers: record.sameAnswers, differentAnswers: record.differentAnswers },
+            isNew: isNewOnServer
         }
     })
 }
@@ -372,6 +399,19 @@ async function processRoundPair(
                 outcomeA.crossedMilestones.map((definition) => ({ key: friendshipBonusKey(userB, definition.id), bonusPoints: definition.bonusPoints }))
             )
         }
+        // Social Notifications - own separate domain/write, fire-and-forget, same
+        // reasoning as the Friendship bonuses above. Only ever fired on a fresh
+        // SAVED + isNew (see ApplyDeltaOutcome.isNew's own doc comment) - never on
+        // ALREADY_PROCESSED (an earlier attempt already reported this) or on a
+        // rescanned/existing partner. Symmetric: A gets B added to A's own unseen
+        // list, B gets A added to B's own unseen list.
+        if (outcomeA.result === 'SAVED' && outcomeA.isNew) {
+            void addUnseenConnection(userA, userB)
+        }
+        if (outcomeB.result === 'SAVED' && outcomeB.isNew) {
+            void addUnseenConnection(userB, userA)
+        }
+
         if (outcomeB.crossedMilestones.length > 0) {
             void awardFriendshipBonuses(
                 userB,
@@ -1047,6 +1087,253 @@ function scanCurrentRoundForSocialPoints(state: RoundStateValue): void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SOCIAL NOTIFICATIONS (unseen Connections badge) - a third fully independent
+// domain from Connections/Social Points above, purely UI/notification
+// metadata (socialQuestNotificationsV1). Own in-memory canonical map, own
+// pending-retry lists - the only thing shared with the other two domains is
+// the same global enqueueWrite queue, exactly like Social Points shares it
+// with Connections.
+//
+// Unlike Connections/Social Points, a write here needs no eventId/dedupe
+// log: "add otherUserId to my unseen set" and "remove these ids from my
+// unseen set" are both naturally idempotent Set operations - applying either
+// twice lands on the same final state as applying it once. That's what makes
+// the simple pending-retry-list pattern below (mirroring
+// pendingFriendshipReconciliations/retryPendingFriendshipBonuses) safe
+// without any extra bookkeeping.
+// ---------------------------------------------------------------------------
+
+const notificationsProfiles = new Map<string, PersistedSocialNotificationsProfileV1>()
+const notificationsLoadingInFlight = new Map<string, Promise<ProfileLoadOutcome<PersistedSocialNotificationsProfileV1>>>()
+
+/**
+ * Per-address tombstone for the mark-seen-before-add-unseen race: a
+ * markConnectionsSeen for `otherUserId` can arrive and be processed BEFORE
+ * this same pair's own addUnseenConnection write (triggered by the SAME
+ * round's Connections SAVE) has landed - the two travel via completely
+ * independent paths (a network message vs. this server's own RESULT-tick
+ * scan) and enqueueWrite's single global FIFO only guarantees writes never
+ * interleave/corrupt each other, NOT that one logically-earlier event's
+ * write is enqueued before a logically-later one's. Without this, the
+ * possible ordering [removeSeen(id) finds nothing to remove] -> [addUnseen(id)
+ * adds it anyway] would resurrect a Connection the player already saw as
+ * unseen again.
+ *
+ * Both addUnseenConnection and removeSeenConnections check/mutate this
+ * Map INSIDE their own enqueueWrite callback, so whichever of the two
+ * actually reaches the front of the global queue first for a given
+ * (address, otherUserId) always completes its full check-and-mutate before
+ * the other one starts - the two orderings below both converge on the
+ * correct final state (otherUserId never ends up persisted as unseen):
+ * - removeSeen runs first (id not yet in persisted unseen) -> tombstones it.
+ *   addUnseen runs later -> sees the tombstone, does NOT add, consumes it.
+ * - addUnseen runs first -> adds it normally. removeSeen runs later -> finds
+ *   it and removes it normally. No tombstone ever created.
+ *
+ * Session-only, never persisted - same accepted residual limit as every
+ * other pending-retry structure in this file (see retryPendingNotificationWrites'
+ * own doc comment): if the server restarts before a tombstoned id's
+ * addUnseenConnection ever arrives, the (unbounded-but-tiny-in-practice)
+ * tombstone entry for it is simply lost with the rest of this process's
+ * memory - no heavier mechanism than this is warranted for UI metadata.
+ */
+const seenBeforeUnseenWrite = new Map<string, Set<string>>()
+
+function tombstoneSeenId(address: string, otherUserId: string): void {
+    let set = seenBeforeUnseenWrite.get(address)
+    if (!set) {
+        set = new Set()
+        seenBeforeUnseenWrite.set(address, set)
+    }
+    set.add(otherUserId)
+}
+
+/** True (and consumes the tombstone) if `otherUserId` was already marked seen for `address` before its own unseen-add could land - see seenBeforeUnseenWrite's own doc comment. */
+function consumeSeenTombstone(address: string, otherUserId: string): boolean {
+    const set = seenBeforeUnseenWrite.get(address)
+    if (!set || !set.has(otherUserId)) return false
+    set.delete(otherUserId)
+    if (set.size === 0) seenBeforeUnseenWrite.delete(address)
+    return true
+}
+
+/** Mirrors loadProfile/loadSocialPointsProfile's own LOADED/MISSING vs FAILED distinction and data-integrity invariant - notificationsProfiles is only ever populated from a confirmed read or a confirmed commit, never a failed read's catch branch. */
+async function loadNotificationsProfile(address: string): Promise<ProfileLoadOutcome<PersistedSocialNotificationsProfileV1>> {
+    const existing = notificationsProfiles.get(address)
+    if (existing) return { profile: existing, loadedSuccessfully: true }
+
+    const inFlight = notificationsLoadingInFlight.get(address)
+    if (inFlight) return inFlight
+
+    const promise = (async (): Promise<ProfileLoadOutcome<PersistedSocialNotificationsProfileV1>> => {
+        try {
+            const raw = await Storage.player.get<unknown>(address, SOCIAL_NOTIFICATIONS_STORAGE_KEY, { fresh: true })
+            const profile = raw === null ? emptySocialNotificationsProfile() : sanitizeSocialNotificationsProfile(raw)
+            notificationsProfiles.set(address, profile)
+            return { profile, loadedSuccessfully: true }
+        } catch (err) {
+            console.error(
+                `[Notifications][SERVER] Storage.player.get failed - this read is NOT cached and NOT safe to write from; a later retry attempts a fresh read: ${
+                    err instanceof Error ? err.message : String(err)
+                }`
+            )
+            return { profile: emptySocialNotificationsProfile(), loadedSuccessfully: false }
+        } finally {
+            notificationsLoadingInFlight.delete(address)
+        }
+    })()
+
+    notificationsLoadingInFlight.set(address, promise)
+    return promise
+}
+
+async function saveNotificationsProfile(address: string, profile: PersistedSocialNotificationsProfileV1): Promise<boolean> {
+    try {
+        const ok = await Storage.player.set(address, SOCIAL_NOTIFICATIONS_STORAGE_KEY, profile)
+        if (!ok) {
+            console.error('[Notifications][SERVER] Storage.player.set returned false - this notification metadata was not persisted, but Connections/gameplay are unaffected')
+        }
+        return ok
+    } catch (err) {
+        console.error(
+            `[Notifications][SERVER] Storage.player.set threw - this notification metadata was not persisted, but Connections/gameplay are unaffected: ${
+                err instanceof Error ? err.message : String(err)
+            }`
+        )
+        return false
+    }
+}
+
+/** One failed addUnseenConnection, queued for a later retry - see retryPendingNotificationWrites. */
+interface PendingUnseenAdd {
+    address: string
+    otherUserId: string
+}
+/** One failed removeSeenConnections, queued for a later retry - carries the exact ids again (idempotent to replay, never a clear-all). */
+interface PendingSeenRemoval {
+    address: string
+    connectionIds: string[]
+}
+const pendingUnseenAdds: PendingUnseenAdd[] = []
+const pendingSeenRemovals: PendingSeenRemoval[] = []
+
+/**
+ * Adds `otherUserId` to `address`'s own persisted unseen list - called only
+ * from processRoundPair, only on a fresh SAVED + isNew Connections delta
+ * (see ApplyDeltaOutcome.isNew). Never called from hydration, reconciliation,
+ * or a rescanned/existing partner - structurally, not by convention, since
+ * this is the only call site.
+ */
+async function addUnseenConnection(address: string, otherUserId: string): Promise<void> {
+    const { profile: baseline, loadedSuccessfully } = await loadNotificationsProfile(address)
+    if (!loadedSuccessfully) {
+        pendingUnseenAdds.push({ address, otherUserId })
+        return
+    }
+
+    await enqueueWrite(async (): Promise<void> => {
+        const current = notificationsProfiles.get(address) ?? baseline
+
+        if (consumeSeenTombstone(address, otherUserId)) {
+            // Already revealed and marked seen before this add could land (see
+            // seenBeforeUnseenWrite's own doc comment) - never resurrect it as unseen.
+            return
+        }
+        if (current.unseenConnectionIds.includes(otherUserId)) return // already there - idempotent no-op
+
+        const candidate: PersistedSocialNotificationsProfileV1 = {
+            version: current.version,
+            unseenConnectionIds: [...current.unseenConnectionIds, otherUserId]
+        }
+        const ok = await saveNotificationsProfile(address, candidate)
+        if (!ok) {
+            pendingUnseenAdds.push({ address, otherUserId })
+            return
+        }
+        notificationsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+    })
+}
+
+/**
+ * Removes exactly `ids` from `address`'s own persisted unseen list - an
+ * exact diff (`persistedUnseen - ids`), NEVER a clear-all, so a Connection
+ * added as unseen while this exact request is still in flight can never be
+ * silently wiped. Called from the markConnectionsSeen message handler below.
+ */
+async function removeSeenConnections(address: string, ids: string[]): Promise<void> {
+    if (ids.length === 0) return
+    const { profile: baseline, loadedSuccessfully } = await loadNotificationsProfile(address)
+    if (!loadedSuccessfully) {
+        pendingSeenRemovals.push({ address, connectionIds: ids })
+        return
+    }
+
+    await enqueueWrite(async (): Promise<void> => {
+        const current = notificationsProfiles.get(address) ?? baseline
+        const remaining = new Set(current.unseenConnectionIds)
+        let changed = false
+
+        for (const id of ids) {
+            if (remaining.has(id)) {
+                remaining.delete(id)
+                changed = true
+            } else {
+                // Not (yet) in the persisted unseen list - its own addUnseenConnection
+                // may still be in flight (see seenBeforeUnseenWrite's own doc comment).
+                // Tombstone it so that add can never resurrect it once it does land.
+                tombstoneSeenId(address, id)
+            }
+        }
+        if (!changed) return // nothing to persist - exact diff, never writes a spurious no-op candidate
+
+        const candidate: PersistedSocialNotificationsProfileV1 = {
+            version: current.version,
+            unseenConnectionIds: [...remaining]
+        }
+        const ok = await saveNotificationsProfile(address, candidate)
+        if (!ok) {
+            pendingSeenRemovals.push({ address, connectionIds: ids })
+            return
+        }
+        notificationsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+    })
+}
+
+/**
+ * Retries every pending unseen-add/seen-removal, once per server tick - same
+ * cadence and drain-before-retry shape as retryPendingFriendshipBonuses
+ * above. Both operations are idempotent (see this section's own file-level
+ * doc comment), so replaying one that already partially succeeded is always
+ * safe.
+ *
+ * Explicit residual limit (documented, accepted - this is UI/notification
+ * metadata, never gameplay): if this server process crashes or restarts
+ * before a pending write here reaches Storage, that specific pending
+ * notification is lost - the underlying Connection itself is entirely
+ * unaffected, since it was already durably saved by its own separate,
+ * already-committed Connections write. Unlike Friendship bonuses (which can
+ * be recovered on a later reconnect via reconcileFriendshipBonuses, re-derived
+ * from Connections' own persisted roundsTogether), there is no equivalent
+ * source of truth to reconcile Notifications from after the fact - "was this
+ * Connection ever new" is only knowable at the instant of its creation. This
+ * is the same category of gap already accepted for pendingFriendshipReconciliations/
+ * pendingLeaderboardSyncs (in-memory-only retry state), just without that
+ * one's eventual reconciliation fallback.
+ */
+function retryPendingNotificationWrites(): void {
+    if (pendingUnseenAdds.length > 0) {
+        const adds = [...pendingUnseenAdds]
+        pendingUnseenAdds.length = 0
+        for (const { address, otherUserId } of adds) void addUnseenConnection(address, otherUserId)
+    }
+    if (pendingSeenRemovals.length > 0) {
+        const removals = [...pendingSeenRemovals]
+        pendingSeenRemovals.length = 0
+        for (const { address, connectionIds } of removals) void removeSeenConnections(address, connectionIds)
+    }
+}
+
 let serverTickIntervalId: number | null = null
 
 export function initPersistenceServer(): void {
@@ -1082,9 +1369,21 @@ export function initPersistenceServer(): void {
             // tolerant-of-Storage-failure contract - only the internal reconciliation
             // decision (below) depends on whether the read was actually reliable.
             const { profile, loadedSuccessfully } = await loadProfile(address)
+            // Own separate domain/read - a Storage.player.get failure here NEVER blocks
+            // or delays the Connections response above (loadNotificationsProfile has its
+            // own independent LOADED/MISSING vs FAILED handling); on failure this simply
+            // sends an empty unseen list for now, exactly like every other tolerant-of-
+            // Storage-failure response this handler already sends for Connections.
+            const { profile: notificationsProfile } = await loadNotificationsProfile(address)
             persistenceRoom.send(
                 'profileResponse',
-                { found: true, dataJson: JSON.stringify(profile), error: '', serverSessionId: SERVER_SESSION_ID },
+                {
+                    found: true,
+                    dataJson: JSON.stringify(profile),
+                    error: '',
+                    serverSessionId: SERVER_SESSION_ID,
+                    unseenConnectionIdsJson: JSON.stringify(notificationsProfile.unseenConnectionIds)
+                },
                 { to: [context.from] }
             )
             // Fire-and-forget - never delays or blocks the response above. See
@@ -1098,7 +1397,26 @@ export function initPersistenceServer(): void {
             void reconcileLeaderboardSnapshot(address)
         } catch (err) {
             console.error(`[Persistence][SERVER] requestProfile handling failed: ${err instanceof Error ? err.message : String(err)}`)
-            persistenceRoom.send('profileResponse', { found: false, dataJson: '', error: 'load_failed', serverSessionId: SERVER_SESSION_ID }, { to: [context.from] })
+            persistenceRoom.send(
+                'profileResponse',
+                { found: false, dataJson: '', error: 'load_failed', serverSessionId: SERVER_SESSION_ID, unseenConnectionIdsJson: '[]' },
+                { to: [context.from] }
+            )
+        }
+    })
+
+    persistenceRoom.onMessage('markConnectionsSeen', async (data, context) => {
+        if (!context) {
+            console.log('[Notifications][SERVER] markConnectionsSeen received with no context - dropping')
+            return
+        }
+        const address = normalizeUserId(context.from) // identity is ALWAYS derived from context.from, never a client-sent field
+        try {
+            const parsed: unknown = JSON.parse(data.connectionIdsJson)
+            const ids = sanitizeConnectionIdList(parsed, MAX_MARK_SEEN_IDS_PER_REQUEST) // never trusts the payload directly - validated/normalized/deduped/capped here
+            await removeSeenConnections(address, ids)
+        } catch (err) {
+            console.error(`[Notifications][SERVER] markConnectionsSeen handling failed for ${address}: ${err instanceof Error ? err.message : String(err)}`)
         }
     })
 
@@ -1118,6 +1436,7 @@ export function initPersistenceServer(): void {
             retryPendingLeaderboardSyncs()
             retryPendingFriendshipBonuses()
             retryPendingTopMatchSyncs()
+            retryPendingNotificationWrites()
             // Detects a Monday 00:00 UTC rollover purely by comparing timestamps,
             // every tick - never depends on a server restart happening near the
             // boundary. See checkTopMatchesWeeklyRollover's own doc comment.
@@ -1251,6 +1570,16 @@ export function initPersistenceClient(): void {
                 }
             }
             console.log(`[Persistence][CLIENT] Loaded ${records.length} persisted connection(s)`)
+
+            // Own separate domain, own separate parse - a failure here is caught by
+            // the SAME catch block below, so a malformed unseenConnectionIdsJson can
+            // never prevent the Connections hydration above (already applied by this
+            // point) from taking effect. Seeds (merges into) socialNotificationsManager's
+            // own live Set and flips it to READY - see hydrateUnseenConnections' own
+            // doc comment for why this is always a merge, never a replace.
+            const parsedUnseenIds: unknown = JSON.parse(data.unseenConnectionIdsJson)
+            const unseenIds = Array.isArray(parsedUnseenIds) ? parsedUnseenIds.filter((id): id is string => typeof id === 'string') : []
+            hydrateUnseenConnections(unseenIds)
         } catch (err) {
             console.error(`[Persistence][CLIENT] Failed to parse loaded profile - continuing session-only: ${err instanceof Error ? err.message : String(err)}`)
         }

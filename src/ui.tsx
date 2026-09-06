@@ -5,7 +5,15 @@ import { isMobile } from '@dcl/sdk/platform'
 import { roundManager, RevealData, RevealEntry } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
 import { MIN_PLAYERS_REQUIRED } from './playerManager'
-import { getTotalConnections, getDisplayNameFor, getAllConnections } from './connectionsManager'
+import { getDisplayNameFor, getAllConnections } from './connectionsManager'
+import {
+    getUnseenConnectionCount,
+    getUnseenConnectionIds,
+    removeSeenIdsLocally,
+    drainPendingReveal,
+    isNotificationsHydrated,
+    requestMarkConnectionsSeen
+} from './socialNotificationsManager'
 import { getFriendshipLevel } from './friendshipManager'
 import { getCompatibility, getSharedValidAnswers } from './compatibilityManager'
 import {
@@ -14,6 +22,7 @@ import {
     PresentedFriendshipCelebration
 } from './socialCelebrationQueue'
 import { LeaderboardButton, LeaderboardPanel, isLeaderboardOpen, closeLeaderboard } from './leaderboardUi'
+import { requestProfilePicture, getProfilePictureUrl } from './profilePictureManager'
 
 /** Virtual design resolution this scene's UI is authored against - kept in sync with the setUiRenderer call below. */
 const VIRTUAL_WIDTH = 1920
@@ -58,6 +67,59 @@ let socialAgendaOpen = false
 let socialAgendaPage = 0
 
 /**
+ * Which Connections this CURRENT Agenda opening has revealed - drives both
+ * the REVEAL banner and each row's "NEW" tag (see SocialAgenda/its row map).
+ * Scoped to a single opening on purpose: reset to [] the moment Agenda
+ * closes (see the per-frame check in uiMenu below), so a reopen never shows
+ * a stale banner or stale NEW tags for Connections already revealed earlier.
+ * Always appended to via revealUnseenConnections() below, NEVER reset to a
+ * fresh snapshot mid-opening - a live Connection arriving while Agenda is
+ * already open must ADD to this, not replace it.
+ */
+let agendaRevealedConnectionIds: string[] = []
+/** Edge-detect guard for "Notifications hydration arrived while Agenda was already open" (see uiMenu's per-frame check) - a single boolean compare, not a poll/diff of any array. Reset alongside agendaRevealedConnectionIds whenever Agenda closes, so the next opening re-checks cleanly. */
+let notificationsHydratedSeenLocally = false
+
+/**
+ * The one shared flow behind every case that reveals unseen Connections
+ * inside the CURRENT Agenda opening: opening Agenda itself (with
+ * Notifications already hydrated), Notifications hydration landing while
+ * Agenda is already open, and a live new Connection arriving while Agenda is
+ * already open (see uiMenu's per-frame check and SocialAgendaButton's
+ * onMouseDown). Always additive to agendaRevealedConnectionIds, always the
+ * exact ids given - never a clear-all, mirroring the server's own exact-diff
+ * contract for removeSeenConnections.
+ *
+ * Idempotent by normalized (trim+lowercase) userId - REQUIRED because the
+ * three call sites above are not mutually exclusive about which ids they can
+ * carry. Concretely: a live Connection created while Agenda is CLOSED gets
+ * queued into socialNotificationsManager's own pendingReveal (drained only
+ * while Agenda is open - see uiMenu's per-frame check), but ALSO already sits
+ * in getUnseenConnectionIds()'s own Set at that point - so the very next
+ * Agenda open both (a) snapshots it via getUnseenConnectionIds() in
+ * SocialAgendaButton's onMouseDown AND (b) drains the same still-pending id
+ * out of pendingReveal on that same opening's first per-frame tick. Without
+ * this dedup, that one Connection would be revealed/mark-seen-requested
+ * twice, appearing as a duplicate name in the banner. Deduping here (once,
+ * centrally) protects every current and future double-signal case without
+ * either call site or socialNotificationsManager needing to know about
+ * socialAgendaOpen or about each other.
+ */
+function revealUnseenConnections(ids: string[]): void {
+    const alreadyRevealed = new Set(agendaRevealedConnectionIds)
+    const newIds = [...new Set(ids.map((id) => id.trim().toLowerCase()))].filter((id) => !alreadyRevealed.has(id))
+    if (newIds.length === 0) return
+
+    agendaRevealedConnectionIds = [...agendaRevealedConnectionIds, ...newIds]
+    removeSeenIdsLocally(newIds)
+    requestMarkConnectionsSeen(newIds)
+}
+
+/** Hover/pressed visual state for SocialAgendaButton only - presentation-only, never affects the open/close logic itself. See AGENDA_BUTTON_ICON_SIZE_* constants' own doc comment for how these combine with the open state into one of three icon sizes (idle/hover-or-active/pressed). */
+let socialAgendaButtonHovered = false
+let socialAgendaButtonPressed = false
+
+/**
  * Below this render scale, panels declared at their normal size (the 280-wide HUD
  * panel) stop being comfortably legible/tappable, so the expanded HUD switches to
  * its narrower COMPACT width. Celebrations always use the compact toast now,
@@ -80,24 +142,72 @@ const HUD_TOP_MARGIN = 10
 /** Extra vertical separation nudge between the CONNECTIONS pill above and the JOIN panel below it - JOIN only, per real-device feedback that they sat too close together. Every other phase's panel position is untouched. */
 const JOIN_EXTRA_TOP_MARGIN = 16
 
-/** Gap between the CONNECTIONS pill and the Agenda button - the two form one fixed HUD group (see uiMenu), always this same distance apart, never repositioned relative to each other between phases. */
+/** Gap between the Agenda and Leaderboard buttons - the two form one fixed HUD group (see uiMenu), always this same distance apart, never repositioned relative to each other between phases. */
 const SOCIAL_HUD_GROUP_GAP = 8
 
 /**
- * The Agenda button's "notebook" look is built entirely from plain background
- * rectangles (a spine strip + two ruled-line bars) rather than a text glyph or
- * emoji - deliberately, since this codebase has no confirmed-reliable notebook/
- * book glyph (only "✕" and "✦" have been validated in production so far - see
- * the "+" ghost investigation for why an unverified glyph's mobile font
- * fallback isn't something to risk on a new icon). Plain colored rectangles
- * with borderRadius/borderColor are already a proven pattern here (see
- * ResultColumn, validated on real mobile), so this has zero font/glyph
- * dependency and renders identically on every platform.
+ * Final Social Quest icon - a real PNG asset with its own transparency,
+ * replacing the earlier provisional "notebook" look built from plain
+ * background rectangles. Rendered via uiBackground.texture +
+ * textureMode:'stretch' (no nine-slice), same proven pattern already
+ * validated for Social Agenda's own profile pictures (see
+ * profilePictureManager.ts / this component's own render).
+ *
+ * No background/border/box at all anymore - the button IS the PNG, nothing
+ * else. Two sizes are tracked separately on purpose:
+ * - AGENDA_BUTTON_HIT_AREA_* is the invisible click/tap target (this
+ *   component's own outer UiEntity, no uiBackground) - kept comfortably
+ *   larger than the icon itself so mobile taps near the icon still land,
+ *   even though nothing visible marks its bounds.
+ * - AGENDA_BUTTON_ICON_SIZE_* is the icon's own visual size, centered
+ *   inside that hit area. IDLE is a deliberate step up from the previous
+ *   44.8/39.8 visual size ("ligeramente más grande, que destaquen más").
+ *   HOVER/ACTIVE grow a few px further, PRESSED shrinks a few px below
+ *   idle for a tactile press-down feel - this SDK has no real glow/
+ *   shadow/blur capability (confirmed absent from both UiBackgroundProps
+ *   and UiTransformProps in this session's own typings audits), so every
+ *   state is expressed purely through this size change, never a box.
  */
-const AGENDA_BUTTON_SIZE_WIDE = 44
-const AGENDA_BUTTON_SIZE_COMPACT = 38
-const AGENDA_BUTTON_SPINE_WIDTH = 10
-const AGENDA_BUTTON_LINE_HEIGHT = 2
+const AGENDA_BUTTON_HIT_AREA_WIDE = 64
+const AGENDA_BUTTON_HIT_AREA_COMPACT = 56
+const AGENDA_BUTTON_ICON_SIZE_WIDE = 50
+const AGENDA_BUTTON_ICON_SIZE_HOVER_WIDE = 54
+const AGENDA_BUTTON_ICON_SIZE_PRESSED_WIDE = 46
+const AGENDA_BUTTON_ICON_SIZE_COMPACT = 44
+const AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT = 48
+const AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT = 40
+const SOCIAL_AGENDA_ICON_PATH = 'assets/images/social-agenda-icon.png'
+
+/**
+ * Unseen-Connections badge, overlaid on SocialAgendaButton only - reads as a
+ * notification bubble (strong pink, cream text/border), not a second button.
+ * Data comes from socialNotificationsManager's own getUnseenConnectionCount()
+ * - NOT the total Connections count (that's shown inside Social Agenda's own
+ * "N CONNECTIONS" line) - this badge counts only Connections that haven't
+ * yet been revealed inside Social Agenda. Stays live because this whole UI
+ * tree is re-rendered every frame by ReactEcsRenderer (same reactive pattern
+ * as every other dynamic value in this file) - no polling was added.
+ *
+ * Sized and positioned against AGENDA_BUTTON_HIT_AREA_* (the button's fixed
+ * invisible hit area), not against the icon's own size - the icon itself
+ * changes size slightly between idle/hover/active/pressed (see
+ * AGENDA_BUTTON_ICON_SIZE_* above), and anchoring to the hit area instead
+ * keeps the badge perfectly stable/legible through all of that, per
+ * explicit instruction. The small negative top/right offset lets it peek
+ * out just past the idle icon's corner, the classic "notification bubble"
+ * look - the hit area itself is invisible, so a few px of overhang past its
+ * bounds changes nothing about the clickable region.
+ */
+const AGENDA_BADGE_SIZE_WIDE = 22
+const AGENDA_BADGE_SIZE_COMPACT = 19
+const AGENDA_BADGE_OFFSET_WIDE = -4
+const AGENDA_BADGE_OFFSET_COMPACT = -3
+const AGENDA_BADGE_FONT_SIZE_WIDE = 13
+const AGENDA_BADGE_FONT_SIZE_COMPACT = 12
+/** Strong/saturated pink, deliberately distinct from the pale AGENDA_PINK used for text/accents elsewhere - a notification badge needs to read as "alert", not blend in as another soft UI tint. */
+const AGENDA_BADGE_BACKGROUND = Color4.create(0.95, 0.2, 0.5, 1)
+/** Above this, the badge shows "99+" rather than a growing 3+ digit number that could overflow its own small circle. */
+const AGENDA_BADGE_MAX_DISPLAY = 99
 
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
@@ -173,6 +283,38 @@ const AGENDA_TERTIARY_FONT_SIZE_COMPACT = 13
 
 /** "N CONNECTIONS" count line - stays MUTED (still secondary metadata) but a touch larger than before (16 -> 17) for slightly more visibility, per explicit feedback that it "works well" but could read a bit stronger. */
 const AGENDA_COUNT_FONT_SIZE = 17
+
+/**
+ * Each connection's real Decentraland avatar portrait, via
+ * uiBackground.avatarTexture (verified in this SDK's own
+ * @dcl/react-ecs type definitions - UiBackgroundProps.avatarTexture:
+ * UiAvatarTexture, `{ userId: string }`, no other required field). Sized
+ * well under the row's own natural height (a 3-line text block already
+ * measures ~76 WIDE / ~61 COMPACT at the current font sizes - see the
+ * report for this task), so adding it never risks 6 rows no longer fitting
+ * a page - confirmed by calculation, not by shrinking anything else.
+ *
+ * Circular clipping: `borderRadius` is set to exactly half of `size` on the
+ * SAME square UiEntity carrying the avatarTexture background, the "cleanest
+ * available" approach in this react-ecs (per explicit instruction not to
+ * build a complex mask workaround) - this SDK's own border-radius/background
+ * clipping is expected to crop the avatar to that circle the same way it
+ * would crop a flat color or image texture, though this has not been
+ * confirmed in a live preview this session and is worth checking visually.
+ * The cream ring is a real 2px border on that same entity. No extra pink/
+ * teal accent dot was added on top - an absolutely-positioned overlay is
+ * exactly the kind of avoidable complexity the brief itself warned against
+ * for an unconfirmed-in-preview feature; the ring alone already delivers
+ * the "cute, on-brand medallion" look.
+ */
+const AGENDA_AVATAR_SIZE_WIDE = 48
+const AGENDA_AVATAR_SIZE_COMPACT = 40
+const AGENDA_AVATAR_BORDER_WIDTH = 2
+const AGENDA_AVATAR_GAP_WIDE = 14
+const AGENDA_AVATAR_GAP_COMPACT = 10
+
+/** Dark translucent background for the profile-picture fallback silhouette - same PANEL_BACKGROUND every other dark surface in this scene uses, so an unresolved avatar still reads as "on-brand" rather than a broken placeholder. */
+const AGENDA_AVATAR_FALLBACK_BACKGROUND = PANEL_BACKGROUND
 
 /**
  * A very faint horizontal rule between consecutive connections - not a real
@@ -429,6 +571,30 @@ export const uiMenu = () => {
         closeLeaderboard()
     }
 
+    // Social Agenda closed (by any path above, the header's own close tap, or the
+    // mutual-exclusion callback below) - this opening's reveal state belongs only to
+    // the opening that just ended. A plain boolean/length check, not a poll of
+    // anything meaningful changing frame-to-frame - cheap to check unconditionally.
+    if (!socialAgendaOpen && (agendaRevealedConnectionIds.length > 0 || notificationsHydratedSeenLocally)) {
+        agendaRevealedConnectionIds = []
+        notificationsHydratedSeenLocally = false
+    }
+
+    if (socialAgendaOpen) {
+        // Notifications hydration landed WHILE Agenda was already open (see
+        // isNotificationsHydrated's own doc comment on why Agenda never blocks
+        // opening on this) - reveal everything it just brought in, exactly once,
+        // via a single boolean edge-detect rather than diffing any array.
+        if (!notificationsHydratedSeenLocally && isNotificationsHydrated()) {
+            notificationsHydratedSeenLocally = true
+            revealUnseenConnections(getUnseenConnectionIds())
+        }
+        // A brand new Connection arrived live while Agenda is already open (see
+        // socialNotificationsManager.ts's own tick()/drainPendingReveal doc
+        // comments) - drains an already-computed queue, never polls/diffs.
+        revealUnseenConnections(drainPendingReveal())
+    }
+
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
         <ScreenInsetArea>
@@ -458,18 +624,16 @@ export const uiMenu = () => {
                 }}
             >
                 <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                    {/* Fixed HUD group [ CONNECTIONS · N ][ AGENDA ], always visible on every
+                    {/* Fixed HUD group [ AGENDA ][ LEADERBOARD ], always visible on every
                         platform and in every phase (including ANSWERING/ANSWER LOCKED) - same
                         fixed position and same two elements throughout, never hidden, reordered,
-                        or moved. Information (the count) and action (opening the Agenda) are
-                        deliberately two separate elements now: SocialHud is a pure indicator with
-                        no tap handler, SocialAgendaButton is the only clickable one, and its tap
-                        is disabled (no-op) during ANSWERING/ANSWER LOCKED - see its own doc
-                        comment - so the player can never cover the question or lose response
-                        time, without either element appearing/disappearing between phases. */}
+                        or moved. Connections' own count is no longer duplicated here as a
+                        separate indicator - Social Agenda is the one place that shows it
+                        ("N CONNECTIONS", see its own header) - so this group is now purely the
+                        two action buttons. SocialAgendaButton's tap is disabled (no-op) during
+                        ANSWERING/ANSWER LOCKED - see its own doc comment - so the player can
+                        never cover the question or lose response time. */}
                     <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <SocialHud wide={wide} />
-                        <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <SocialAgendaButton wide={wide} />
                         <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <LeaderboardButton wide={wide} onOpen={() => { socialAgendaOpen = false }} />
@@ -936,41 +1100,10 @@ const ResultColumn = ({
 }
 
 /**
- * Persistent social status indicator - visible anywhere in the scene, in
- * every round phase and join state, with no exceptions, so its position/
- * visibility is never something the player has to relearn between phases.
- * Consumes connectionsManager's read API only; no relationship logic is
- * reconstructed here. Single unconditional compact pill on every platform -
- * same structure/text everywhere, `wide` only nudges fontSize/padding.
- *
- * Information only, no longer an action: it has no tap handler at all -
- * opening the Social Agenda is SocialAgendaButton's job, the separate
- * element right next to it (see uiMenu). Splitting the two means this pill
- * can never accidentally be tapped/misread as a button.
- */
-const SocialHud = ({ wide }: { wide: boolean }) => {
-    const total = getTotalConnections()
-
-    return (
-        <UiEntity
-            uiTransform={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                padding: wide ? { top: 12, bottom: 12, left: 16, right: 16 } : { top: 10, bottom: 10, left: 14, right: 14 }
-            }}
-            uiBackground={{ color: PANEL_BACKGROUND }}
-        >
-            <Label value={`CONNECTIONS · ${total}`} fontSize={wide ? 18 : 16} color={Color4.White()} />
-        </UiEntity>
-    )
-}
-
-/**
- * Opens the Social Agenda overlay - the sole clickable half of the fixed HUD
- * group (see uiMenu), separate from the read-only CONNECTIONS pill next to
- * it. Its "notebook" icon is built entirely from plain background rectangles
- * (a spine strip + two ruled-line bars), not a text glyph or emoji - see
- * AGENDA_BUTTON_* constants' doc comment for why.
+ * Opens the Social Agenda overlay - one of the two buttons in the fixed HUD
+ * group (see uiMenu). Its icon is the final Social Agenda PNG asset (see
+ * AGENDA_BUTTON_* constants' doc comment) - the earlier provisional
+ * "notebook" icon built from plain rectangles has been retired.
  *
  * A tap opens the Social Agenda directly - except during ANSWERING (which
  * also covers ANSWER LOCKED: roundManager's phase stays 'answering' for
@@ -978,38 +1111,83 @@ const SocialHud = ({ wide }: { wide: boolean }) => {
  * This is deliberate: the button stays visually stable and in the same
  * place so the player never loses their sense of where it is, but can't be
  * used to cover the question or eat into response time while one is live.
+ *
+ * Hover/pressed/active are purely visual (see AGENDA_BUTTON_* icon-size
+ * constants above), layered on top of the exact same click guard/logic
+ * above, never changing what a tap does. `active` mirrors LeaderboardButton's
+ * own open-state treatment in leaderboardUi.tsx, read directly from this
+ * file's own socialAgendaOpen (no new plumbing needed, both live in this
+ * file).
  */
 const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
-    const size = wide ? AGENDA_BUTTON_SIZE_WIDE : AGENDA_BUTTON_SIZE_COMPACT
-    const pagesWidth = size - AGENDA_BUTTON_SPINE_WIDTH
+    const hitArea = wide ? AGENDA_BUTTON_HIT_AREA_WIDE : AGENDA_BUTTON_HIT_AREA_COMPACT
+    const active = socialAgendaOpen
+    const iconSize = socialAgendaButtonPressed
+        ? (wide ? AGENDA_BUTTON_ICON_SIZE_PRESSED_WIDE : AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT)
+        : active || socialAgendaButtonHovered
+          ? (wide ? AGENDA_BUTTON_ICON_SIZE_HOVER_WIDE : AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT)
+          : (wide ? AGENDA_BUTTON_ICON_SIZE_WIDE : AGENDA_BUTTON_ICON_SIZE_COMPACT)
+    const unseenCount = getUnseenConnectionCount()
+    const badgeText = unseenCount > AGENDA_BADGE_MAX_DISPLAY ? `${AGENDA_BADGE_MAX_DISPLAY}+` : `${unseenCount}`
+    const badgeSize = wide ? AGENDA_BADGE_SIZE_WIDE : AGENDA_BADGE_SIZE_COMPACT
+    const badgeOffset = wide ? AGENDA_BADGE_OFFSET_WIDE : AGENDA_BADGE_OFFSET_COMPACT
 
     return (
         <UiEntity
             uiTransform={{
-                width: size,
-                height: size,
-                flexDirection: 'row',
-                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
-                borderWidth: 1,
-                borderRadius: 8
+                width: hitArea,
+                height: hitArea,
+                justifyContent: 'center',
+                alignItems: 'center'
             }}
-            uiBackground={{ color: PANEL_BACKGROUND }}
+            onMouseEnter={() => (socialAgendaButtonHovered = true)}
+            onMouseLeave={() => {
+                socialAgendaButtonHovered = false
+                socialAgendaButtonPressed = false // dragging off mid-press shouldn't leave it stuck pressed
+            }}
             onMouseDown={() => {
+                socialAgendaButtonPressed = true
                 // Covers ANSWER LOCKED and the pre-round COUNTDOWN too - see doc comment above.
                 const phase = roundManager.getSnapshot().phase
                 if (phase === 'answering' || phase === 'countdown') return
                 socialAgendaPage = 0
                 socialAgendaOpen = true
                 closeLeaderboard() // mutually exclusive centered overlays - see isLeaderboardOpen's own doc comment
+                // Reveal-on-open (see revealUnseenConnections' own doc comment). Gated on
+                // hydration being READY - if it isn't yet, Agenda still opens normally
+                // (never blocked on Storage); uiMenu's own per-frame check reveals
+                // whatever hydration brings in the moment it lands, still within this
+                // same opening.
+                if (isNotificationsHydrated()) {
+                    notificationsHydratedSeenLocally = true
+                    revealUnseenConnections(getUnseenConnectionIds())
+                }
             }}
+            onMouseUp={() => (socialAgendaButtonPressed = false)}
         >
-            {/* Spine: reads as a notebook's binding edge. */}
-            <UiEntity uiTransform={{ width: AGENDA_BUTTON_SPINE_WIDTH, height: '100%' }} uiBackground={{ color: Color4.create(1, 0.85, 0.2, 1) }} />
-            {/* Pages: two short ruled-line bars, centered. */}
-            <UiEntity uiTransform={{ width: pagesWidth, height: '100%', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
-                <UiEntity uiTransform={{ width: '60%', height: AGENDA_BUTTON_LINE_HEIGHT, margin: { bottom: 4 } }} uiBackground={{ color: MUTED }} />
-                <UiEntity uiTransform={{ width: '60%', height: AGENDA_BUTTON_LINE_HEIGHT }} uiBackground={{ color: MUTED }} />
-            </UiEntity>
+            <UiEntity
+                uiTransform={{ width: iconSize, height: iconSize }}
+                uiBackground={{ texture: { src: SOCIAL_AGENDA_ICON_PATH }, textureMode: 'stretch' }}
+            />
+            {unseenCount > 0 && (
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { top: badgeOffset, right: badgeOffset },
+                        width: badgeSize,
+                        height: badgeSize,
+                        borderRadius: badgeSize / 2,
+                        borderWidth: 1,
+                        borderColor: AGENDA_CREAM,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        pointerFilter: 'none' // never intercepts the tap - the button's own hit area handles it, see doc comment above
+                    }}
+                    uiBackground={{ color: AGENDA_BADGE_BACKGROUND }}
+                >
+                    <Label value={badgeText} fontSize={wide ? AGENDA_BADGE_FONT_SIZE_WIDE : AGENDA_BADGE_FONT_SIZE_COMPACT} color={AGENDA_CREAM} />
+                </UiEntity>
+            )}
         </UiEntity>
     )
 }
@@ -1103,8 +1281,7 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
             uiBackground={{ color: PANEL_BACKGROUND }}
         >
             {/* Header is the whole-row tap target to close - generous padding (not just the "✕"
-                glyph), same proven pattern as SocialHud's own header. This is the only close
-                control now; no footer bar (see report). Top corners match the panel's own
+                glyph). This is the only close control now; no footer bar (see report). Top corners match the panel's own
                 radius so this opaque rectangle doesn't square off the panel's rounded top -
                 same technique as leaderboardUi.tsx's own header. */}
             <UiEntity
@@ -1158,47 +1335,189 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             color={MUTED}
                             uiTransform={{ margin: { bottom: 14 } }}
                         />
+                        {/* REVEAL banner - scoped to THIS opening only (agendaRevealedConnectionIds
+                            is reset to [] the moment Agenda closes, see uiMenu's own per-frame
+                            check), never persisted. Same display-name resolution priority as each
+                            row below (a currently-observable name wins over the persisted one,
+                            which wins over the generic fallback) - no extra profile requests, just
+                            the data this panel already has. Names beyond MAX_CELEBRATION_NAMES
+                            collapse into "+N more", reusing that same constant/pattern already
+                            established for the HUD toasts (joinNamesForToast) - own join here since
+                            the exact copy format ("Name1, Name2 +1 more") differs from that one's
+                            (" + " / "+N"). Visual treatment deliberately simple/placeholder - a
+                            bordered box in the panel's own existing palette, not yet the
+                            nine-slice/sticker polish planned for a later pass. */}
+                        {agendaRevealedConnectionIds.length > 0 &&
+                            (() => {
+                                const revealedNames = agendaRevealedConnectionIds.map((otherUserId) => {
+                                    const connection = allConnections.find((c) => c.otherUserId.toLowerCase() === otherUserId)
+                                    return getDisplayNameFor(otherUserId) ?? connection?.lastKnownDisplayName ?? QUESTMATE_FALLBACK
+                                })
+                                const shownNames = revealedNames.slice(0, MAX_CELEBRATION_NAMES)
+                                const remainingNames = revealedNames.length - shownNames.length
+                                const namesText = remainingNames > 0 ? `${shownNames.join(', ')} +${remainingNames} more` : shownNames.join(', ')
+                                const headerText =
+                                    agendaRevealedConnectionIds.length === 1 ? 'NEW CONNECTION!' : `${agendaRevealedConnectionIds.length} NEW CONNECTIONS!`
+                                return (
+                                    <UiEntity
+                                        uiTransform={{
+                                            width: '100%',
+                                            flexDirection: 'column',
+                                            padding: { top: 12, bottom: 12, left: 16, right: 16 },
+                                            margin: { bottom: 14 },
+                                            borderRadius: 12,
+                                            borderWidth: 1,
+                                            borderColor: AGENDA_PINK
+                                        }}
+                                        uiBackground={{ color: PANEL_BACKGROUND }}
+                                    >
+                                        <Label value={headerText} fontSize={wide ? 18 : 15} color={AGENDA_PINK} />
+                                        <Label
+                                            value={`${namesText} joined your Social Agenda`}
+                                            fontSize={wide ? 15 : 13}
+                                            color={AGENDA_CREAM}
+                                            textWrap="wrap"
+                                            uiTransform={{ margin: { top: 4 } }}
+                                        />
+                                    </UiEntity>
+                                )
+                            })()}
                         {pageEntries.map((connection, index) => {
                             // Priority: a currently-observable name always wins over a persisted
                             // one (which may be stale), which in turn wins over the generic fallback.
                             const name = getDisplayNameFor(connection.otherUserId) ?? connection.lastKnownDisplayName ?? QUESTMATE_FALLBACK
+                            // Purely visual - never touches ConnectionRecord. Normalized the same
+                            // way socialNotificationsManager's ids already are (lowercase), since
+                            // otherUserId here is the raw, case-preserved address.
+                            const isNewRow = agendaRevealedConnectionIds.includes(connection.otherUserId.toLowerCase())
                             const level = getFriendshipLevel(connection.roundsTogether)
                             const affinity = affinityLabel(connection.sameAnswers, connection.differentAnswers)
                             const nameFontSize = compactUi ? AGENDA_NAME_FONT_SIZE_COMPACT : AGENDA_NAME_FONT_SIZE_WIDE
                             const secondaryFontSize = compactUi ? AGENDA_SECONDARY_FONT_SIZE_COMPACT : AGENDA_SECONDARY_FONT_SIZE_WIDE
                             const tertiaryFontSize = compactUi ? AGENDA_TERTIARY_FONT_SIZE_COMPACT : AGENDA_TERTIARY_FONT_SIZE_WIDE
                             const isLastOnPage = index === pageEntries.length - 1
+                            const avatarSize = compactUi ? AGENDA_AVATAR_SIZE_COMPACT : AGENDA_AVATAR_SIZE_WIDE
+                            const avatarGap = compactUi ? AGENDA_AVATAR_GAP_COMPACT : AGENDA_AVATAR_GAP_WIDE
+                            // Kicks off resolution once per userId (safe to call every render - see
+                            // profilePictureManager.ts's own doc comment on why the cache itself is the
+                            // dedup guard) and reads back whatever is currently known. Works offline -
+                            // this hits the catalyst directly by address, never getPlayer(), so a
+                            // Connection who isn't currently in the scene still resolves.
+                            requestProfilePicture(connection.otherUserId)
+                            const pictureUrl = getProfilePictureUrl(connection.otherUserId)
                             return (
                                 <UiEntity key={connection.otherUserId} uiTransform={{ width: '100%', flexDirection: 'column' }}>
-                                    {/* Line 1: name - the row's own primary element, cream, largest weight. */}
-                                    <Label value={name} fontSize={nameFontSize} color={AGENDA_CREAM} />
-                                    {/* Line 2: affinity (pink, primary) + shared answers (muted, secondary),
-                                        a discreet " · " separator between them only when both exist - the
-                                        two below-threshold states (NO AFFINITY DATA / GETTING TO KNOW EACH
-                                        OTHER...) are single deliberate statements with no count to pair
-                                        with, shown muted rather than pink so they read as calm/expected,
-                                        never like an error. */}
-                                    <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
-                                        <Label value={affinity.primary} fontSize={secondaryFontSize} color={affinity.secondary ? AGENDA_PINK : MUTED} textWrap="wrap" />
-                                        {affinity.secondary && (
-                                            <Label value={` · ${affinity.secondary}`} fontSize={secondaryFontSize} color={MUTED} textWrap="wrap" />
-                                        )}
-                                    </UiEntity>
-                                    {/* Line 3: Friendship level (teal, its own bit of personality) +
-                                        rounds together (muted) - only once a level exists at all (a
-                                        brand new Connection has none yet, same as before). */}
-                                    {level !== null && (
-                                        <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
-                                            <Label value={`✦ ${level}`} fontSize={tertiaryFontSize} color={AGENDA_TEAL} textWrap="wrap" />
-                                            <Label value=" · " fontSize={tertiaryFontSize} color={MUTED} />
-                                            <Label
-                                                value={`${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
-                                                fontSize={tertiaryFontSize}
-                                                color={MUTED}
-                                                textWrap="wrap"
-                                            />
+                                    <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'center' }}>
+                                        {/* Real DCL profile picture (catalyst snapshots.face256, resolved by
+                                            profilePictureManager.ts - NOT uiBackground.avatarTexture, which
+                                            was tried first and rejected: its crop is too tight, showing only
+                                            eyes/nose/glasses). Circular medallion, OPTION B (confirmed
+                                            necessary - OPTION A, borderRadius directly on the textured
+                                            entity, was tried and visually confirmed to NOT clip the
+                                            texture): an OUTER ring entity owns the cream border + borderRadius
+                                            + `overflow:'hidden'` (both real UiTransformProps fields - no
+                                            `mask`/`clip-path` exists in this SDK, confirmed absent from its
+                                            own typings), and a separate INNER entity filling 100% of it
+                                            carries either the resolved photo or a fallback silhouette - the
+                                            inner square content gets clipped to the outer's rounded shape via
+                                            that overflow:hidden. The inner also repeats borderRadius as a
+                                            defensive belt-and-suspenders measure, in case this renderer's
+                                            clip check looks at the clipped child's own shape rather than
+                                            only the parent's. */}
+                                        <UiEntity
+                                            uiTransform={{
+                                                width: avatarSize,
+                                                height: avatarSize,
+                                                borderRadius: avatarSize / 2,
+                                                borderWidth: AGENDA_AVATAR_BORDER_WIDTH,
+                                                borderColor: AGENDA_CREAM,
+                                                overflow: 'hidden',
+                                                flexShrink: 0
+                                            }}
+                                        >
+                                            {pictureUrl ? (
+                                                <UiEntity
+                                                    uiTransform={{ width: '100%', height: '100%', borderRadius: avatarSize / 2 }}
+                                                    uiBackground={{ texture: { src: pictureUrl }, textureMode: 'stretch' }}
+                                                />
+                                            ) : (
+                                                // Fallback while loading/missing/failed - a single generic
+                                                // silhouette (head + shoulders) built from plain colored
+                                                // UiEntity shapes, never avatarTexture (its tight crop is the
+                                                // exact problem this feature was built to avoid).
+                                                <UiEntity
+                                                    uiTransform={{
+                                                        width: '100%',
+                                                        height: '100%',
+                                                        borderRadius: avatarSize / 2,
+                                                        flexDirection: 'column',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'flex-end'
+                                                    }}
+                                                    uiBackground={{ color: AGENDA_AVATAR_FALLBACK_BACKGROUND }}
+                                                >
+                                                    <UiEntity
+                                                        uiTransform={{
+                                                            width: avatarSize * 0.42,
+                                                            height: avatarSize * 0.42,
+                                                            borderRadius: (avatarSize * 0.42) / 2,
+                                                            margin: { bottom: avatarSize * 0.05 }
+                                                        }}
+                                                        uiBackground={{ color: AGENDA_CREAM }}
+                                                    />
+                                                    <UiEntity
+                                                        uiTransform={{ width: avatarSize * 0.78, height: avatarSize * 0.55, borderRadius: avatarSize * 0.4 }}
+                                                        uiBackground={{ color: AGENDA_CREAM }}
+                                                    />
+                                                </UiEntity>
+                                            )}
                                         </UiEntity>
-                                    )}
+                                        <UiEntity uiTransform={{ width: avatarGap }} />
+                                        <UiEntity uiTransform={{ flexDirection: 'column', flexGrow: 1 }}>
+                                            {/* Line 1: name - the row's own primary element, cream, largest weight - plus
+                                                a small NEW tag, purely visual, only while this Connection is part of
+                                                THIS Agenda opening's reveal (see agendaRevealedConnectionIds' own doc
+                                                comment) - gone on the very next opening. */}
+                                            <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
+                                                <Label value={name} fontSize={nameFontSize} color={AGENDA_CREAM} />
+                                                {isNewRow && (
+                                                    <UiEntity
+                                                        uiTransform={{ margin: { left: 8 }, padding: { top: 2, bottom: 2, left: 6, right: 6 }, borderRadius: 6 }}
+                                                        uiBackground={{ color: AGENDA_PINK }}
+                                                    >
+                                                        <Label value="NEW" fontSize={compactUi ? 10 : 11} color={PANEL_BACKGROUND} />
+                                                    </UiEntity>
+                                                )}
+                                            </UiEntity>
+                                            {/* Line 2: affinity (pink, primary) + shared answers (muted, secondary),
+                                                a discreet " · " separator between them only when both exist - the
+                                                two below-threshold states (NO AFFINITY DATA / GETTING TO KNOW EACH
+                                                OTHER...) are single deliberate statements with no count to pair
+                                                with, shown muted rather than pink so they read as calm/expected,
+                                                never like an error. */}
+                                            <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
+                                                <Label value={affinity.primary} fontSize={secondaryFontSize} color={affinity.secondary ? AGENDA_PINK : MUTED} textWrap="wrap" />
+                                                {affinity.secondary && (
+                                                    <Label value={` · ${affinity.secondary}`} fontSize={secondaryFontSize} color={MUTED} textWrap="wrap" />
+                                                )}
+                                            </UiEntity>
+                                            {/* Line 3: Friendship level (teal, its own bit of personality) +
+                                                rounds together (muted) - only once a level exists at all (a
+                                                brand new Connection has none yet, same as before). */}
+                                            {level !== null && (
+                                                <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
+                                                    <Label value={`✦ ${level}`} fontSize={tertiaryFontSize} color={AGENDA_TEAL} textWrap="wrap" />
+                                                    <Label value=" · " fontSize={tertiaryFontSize} color={MUTED} />
+                                                    <Label
+                                                        value={`${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
+                                                        fontSize={tertiaryFontSize}
+                                                        color={MUTED}
+                                                        textWrap="wrap"
+                                                    />
+                                                </UiEntity>
+                                            )}
+                                        </UiEntity>
+                                    </UiEntity>
                                     {/* Very faint divider between connections - see AGENDA_ROW_DIVIDER_COLOR's
                                         own doc comment. Skipped after the last row on this page so nothing
                                         stray sits directly above the pagination footer. */}

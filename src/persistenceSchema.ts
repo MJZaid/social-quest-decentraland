@@ -289,3 +289,79 @@ export function getQuestProgress(validRounds: number): number {
 export function getSocialPointsSnapshot(validRounds: number): SocialPointsSnapshot {
     return { validRounds, socialPoints: getSocialPoints(validRounds), questProgress: getQuestProgress(validRounds) }
 }
+
+// -----------------------------------------------------------------------
+// SOCIAL NOTIFICATIONS - a third fully independent persisted domain, purely
+// UI/notification metadata: which Connections this player has a real, SAVED
+// Connection with but hasn't yet had revealed inside Social Agenda. Never
+// touches PersistedConnectionRecord or PersistedSocialPointsProfileV1 above -
+// own Storage key, own schema, own dedupe-free shape (a plain id list, no
+// event log needed - see persistenceManager.ts's own doc comment on why this
+// domain's writes are naturally idempotent, unlike Connections' deltas).
+// -----------------------------------------------------------------------
+
+export interface PersistedSocialNotificationsProfileV1 {
+    version: 1
+    /**
+     * Normalized (lowercase) otherUserIds this player has a real, SAVED
+     * Connection with but hasn't yet had revealed inside Social Agenda.
+     * Semantically a Set - stored as an array only because that's what
+     * JSON/Storage carries; every read/write path treats duplicates as a
+     * no-op. Only ever added to at the exact moment persistenceManager.ts
+     * confirms a brand-new Connection SAVE (see ApplyDeltaOutcome.isNew) -
+     * never from hydration, reconciliation, ALREADY_PROCESSED, a Friendship
+     * milestone, or an existing Connection's rounds/Affinity changing.
+     */
+    unseenConnectionIds: string[]
+}
+
+export const SOCIAL_NOTIFICATIONS_SCHEMA_VERSION = 1
+export const SOCIAL_NOTIFICATIONS_STORAGE_KEY = 'socialQuestNotificationsV1'
+/** Defensive cap on the persisted unseen list, same spirit as MAX_RECENT_EVENT_IDS above - a real player is never plausibly unaware of more than a tiny handful of Connections at once (Social Agenda is one tap away), so this is a safety bound, not a realistic ceiling. */
+export const MAX_UNSEEN_CONNECTION_IDS = 200
+/** Defensive cap on how many ids a single markConnectionsSeen request can carry - same reasoning as MAX_DELTAS_PER_ROUND above (a real reveal never remotely approaches this many at once). */
+export const MAX_MARK_SEEN_IDS_PER_REQUEST = 64
+
+export function emptySocialNotificationsProfile(): PersistedSocialNotificationsProfileV1 {
+    return { version: SOCIAL_NOTIFICATIONS_SCHEMA_VERSION, unseenConnectionIds: [] }
+}
+
+/**
+ * Shared validation for any untrusted list of connection ids reaching this
+ * layer - a Storage read (sanitizeSocialNotificationsProfile below) AND a
+ * client-sent markConnectionsSeen payload (persistenceManager.ts) both funnel
+ * through this one function, so the two can never disagree about what counts
+ * as a valid id. Never trusts the client: only non-empty strings survive,
+ * every survivor is normalized (case-insensitive, same as every other userId
+ * in this persistence layer), duplicates are collapsed via the Set, and the
+ * result is capped at `maxLength` - a malformed, oversized, or malicious
+ * payload can never grow Storage unboundedly or throw while parsing.
+ */
+export function sanitizeConnectionIdList(raw: unknown, maxLength: number): string[] {
+    if (!Array.isArray(raw)) return []
+    const ids = new Set<string>()
+    for (const entry of raw) {
+        if (typeof entry !== 'string') continue
+        const normalized = normalizeUserId(entry)
+        if (normalized.length === 0) continue
+        ids.add(normalized)
+        if (ids.size >= maxLength) break
+    }
+    return [...ids]
+}
+
+/**
+ * Defensively validates/repairs a value loaded from Storage.player before
+ * anything else touches it - same discipline as sanitizeProfile/
+ * sanitizeSocialPointsProfile above, kept fully separate. Never throws; any
+ * unrecognized shape or wrong version falls back to
+ * emptySocialNotificationsProfile(), never a crash and never unchecked data
+ * reaching gameplay-facing code.
+ */
+export function sanitizeSocialNotificationsProfile(raw: unknown): PersistedSocialNotificationsProfileV1 {
+    if (!raw || typeof raw !== 'object') return emptySocialNotificationsProfile()
+    const value = raw as Record<string, unknown>
+    if (value.version !== SOCIAL_NOTIFICATIONS_SCHEMA_VERSION) return emptySocialNotificationsProfile()
+
+    return { version: SOCIAL_NOTIFICATIONS_SCHEMA_VERSION, unseenConnectionIds: sanitizeConnectionIdList(value.unseenConnectionIds, MAX_UNSEEN_CONNECTION_IDS) }
+}

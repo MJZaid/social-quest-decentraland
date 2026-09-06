@@ -45,9 +45,24 @@ const ROW_HIGHLIGHT = Color4.create(1, 0.75, 0.9, 0.12)
 /** Secondary accent - reused verbatim from ui.tsx's existing Friendship-level line color (Social Agenda), not invented here. Used sparingly, only for the rank number, so it never competes with the name (cream) or Social Points (pink). */
 const TEAL_ACCENT = Color4.create(0.4, 0.75, 1, 1)
 
-/** Same value as ui.tsx's own AGENDA_BUTTON_SIZE_WIDE/COMPACT, intentionally: the Leaderboard button is sized to match the Social Agenda button next to it in the HUD. Duplicated rather than imported - see this file's own top comment. Deliberately NOT restyled in this pass - it's a paired HUD icon with the (still-unstyled) Agenda button, and restyling only one half of that pair would read as an inconsistency rather than an improvement; it's a natural candidate for its own follow-up. */
-const LEADERBOARD_BUTTON_SIZE_WIDE = 44
-const LEADERBOARD_BUTTON_SIZE_COMPACT = 38
+/**
+ * Same values/reasoning as ui.tsx's own AGENDA_BUTTON_HIT_AREA_* and
+ * AGENDA_BUTTON_ICON_SIZE_* - duplicated for the same "sibling surfaces, no
+ * cross-file dependency" reason as CREAM/SOCIAL_PINK/TEAL_ACCENT above. See
+ * ui.tsx's own copy of this comment for the full reasoning (no background/
+ * border/box, separate invisible hit area vs. visual icon size, state
+ * feedback expressed purely through icon size since this SDK has no real
+ * glow/shadow/blur capability) - identical here.
+ */
+const LEADERBOARD_BUTTON_HIT_AREA_WIDE = 64
+const LEADERBOARD_BUTTON_HIT_AREA_COMPACT = 56
+const LEADERBOARD_BUTTON_ICON_SIZE_WIDE = 50
+const LEADERBOARD_BUTTON_ICON_SIZE_HOVER_WIDE = 54
+const LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_WIDE = 46
+const LEADERBOARD_BUTTON_ICON_SIZE_COMPACT = 44
+const LEADERBOARD_BUTTON_ICON_SIZE_HOVER_COMPACT = 48
+const LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_COMPACT = 40
+const LEADERBOARD_ICON_PATH = 'assets/images/leaderboard-icon.png'
 
 /**
  * How many ranked players the Leaderboard overlay requests/shows - fixed,
@@ -132,6 +147,10 @@ let topMatchesPage = 0
 /** Whether the Leaderboard overlay is open - same role/lifecycle as ui.tsx's own socialAgendaOpen (presentation-only, local, never synced), mutually exclusive with it since both are centered overlays occupying the same screen region. Default: closed. Deliberately not exported directly - see isLeaderboardOpen/openLeaderboard/closeLeaderboard below. */
 let leaderboardOpen = false
 
+/** Hover/pressed visual state for LeaderboardButton only - presentation-only, never affects the open/close logic itself. Same pattern as ui.tsx's own socialAgendaButtonHovered/Pressed. */
+let leaderboardButtonHovered = false
+let leaderboardButtonPressed = false
+
 export function isLeaderboardOpen(): boolean {
     return leaderboardOpen
 }
@@ -145,14 +164,14 @@ export function closeLeaderboard(): void {
 }
 
 /**
- * Opens the Leaderboard overlay (Phase 2B-3) - same fixed-position role in
- * the HUD group as SocialAgendaButton next to it, same ANSWERING/ANSWER
- * LOCKED tap-disable rule, same "✦" glyph already validated in production
- * (see celebration toasts) rather than an unverified new icon (see
- * AGENDA_BUTTON_* doc comment for why glyphs are chosen this carefully
- * here). A tap requests fresh data every time - no cached-is-good-enough
- * skip - but never clears whatever response is already showing, so a
- * previous result stays visible while the new one is in flight.
+ * Opens the Leaderboard overlay - same fixed-position role in the HUD group
+ * as SocialAgendaButton next to it, same ANSWERING/ANSWER LOCKED tap-disable
+ * rule. Icon is the final Leaderboard PNG asset - the earlier provisional
+ * 3-bar "ranking chart" built from plain rectangles has been retired.
+ *
+ * A tap requests fresh data every time - no cached-is-good-enough skip - but
+ * never clears whatever response is already showing, so a previous result
+ * stays visible while the new one is in flight.
  *
  * Unlike SocialAgendaButton, opening this does NOT require `session.joined`
  * (see the leaderboardOpen auto-close rule in uiMenu) - the leaderboard is
@@ -163,23 +182,37 @@ export function closeLeaderboard(): void {
  * callback that closes the Social Agenda, keeping the two centered overlays
  * mutually exclusive without this file needing to import ui.tsx's own
  * socialAgendaOpen state (which would make the two files circular).
+ *
+ * Hover/pressed/active are purely visual (see LEADERBOARD_BUTTON_* icon-size
+ * constants above), layered on top of the exact same click guard/logic
+ * above, never changing what a tap does. `active` mirrors SocialAgendaButton's
+ * own open-state treatment in ui.tsx, read directly from this file's own
+ * isLeaderboardOpen().
  */
 export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () => void }) => {
-    const size = wide ? LEADERBOARD_BUTTON_SIZE_WIDE : LEADERBOARD_BUTTON_SIZE_COMPACT
+    const hitArea = wide ? LEADERBOARD_BUTTON_HIT_AREA_WIDE : LEADERBOARD_BUTTON_HIT_AREA_COMPACT
+    const active = leaderboardOpen
+    const iconSize = leaderboardButtonPressed
+        ? (wide ? LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_COMPACT)
+        : active || leaderboardButtonHovered
+          ? (wide ? LEADERBOARD_BUTTON_ICON_SIZE_HOVER_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_HOVER_COMPACT)
+          : (wide ? LEADERBOARD_BUTTON_ICON_SIZE_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_COMPACT)
 
     return (
         <UiEntity
             uiTransform={{
-                width: size,
-                height: size,
+                width: hitArea,
+                height: hitArea,
                 justifyContent: 'center',
-                alignItems: 'center',
-                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
-                borderWidth: 1,
-                borderRadius: 8
+                alignItems: 'center'
             }}
-            uiBackground={{ color: PANEL_BACKGROUND }}
+            onMouseEnter={() => (leaderboardButtonHovered = true)}
+            onMouseLeave={() => {
+                leaderboardButtonHovered = false
+                leaderboardButtonPressed = false // dragging off mid-press shouldn't leave it stuck pressed
+            }}
             onMouseDown={() => {
+                leaderboardButtonPressed = true
                 // Covers ANSWER LOCKED and the pre-round COUNTDOWN too - same reasoning as SocialAgendaButton above.
                 const phase = roundManager.getSnapshot().phase
                 if (phase === 'answering' || phase === 'countdown') return
@@ -190,8 +223,12 @@ export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () 
                 onOpen() // mutually exclusive centered overlays - see this component's own doc comment
                 requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer - Top Matches is requested lazily, only once its tab is actually clicked (see LeaderboardTabButton), never here
             }}
+            onMouseUp={() => (leaderboardButtonPressed = false)}
         >
-            <Label value="✦" fontSize={wide ? 22 : 18} color={Color4.create(1, 0.85, 0.2, 1)} />
+            <UiEntity
+                uiTransform={{ width: iconSize, height: iconSize }}
+                uiBackground={{ texture: { src: LEADERBOARD_ICON_PATH }, textureMode: 'stretch' }}
+            />
         </UiEntity>
     )
 }

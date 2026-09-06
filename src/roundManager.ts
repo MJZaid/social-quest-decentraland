@@ -8,6 +8,7 @@ import { tick as tickConnectionCelebration } from './connectionCelebration'
 import { evaluateFriendshipLevels } from './friendshipManager'
 import { tick as tickFriendshipCelebration } from './friendshipCelebration'
 import { tick as tickSocialCelebrationQueue } from './socialCelebrationQueue'
+import { tick as tickSocialNotifications } from './socialNotificationsManager'
 import { tickPersistenceLoad, tickPersistenceCapture } from './persistenceManager'
 import {
     AnswerOption,
@@ -247,6 +248,12 @@ class RoundManager {
         evaluateFriendshipLevels()
         tickFriendshipCelebration(stateAfterElection)
         tickConnectionCelebration(stateAfterElection)
+        // Independent third consumer of connectionsManager's own
+        // getNewConnectionsFromLastRound(), same signal tickConnectionCelebration
+        // already reads - see socialNotificationsManager.ts's own file-level doc
+        // comment for why neither connectionsManager.ts nor connectionCelebration.ts
+        // needed any change for this.
+        tickSocialNotifications(stateAfterElection)
         // Deliberately unconditional (no phase check, no state argument) - the queue must
         // keep capturing/advancing regardless of round phase so a captured celebration is
         // never lost just because the round moves on to ANSWERING while it's still queued.
