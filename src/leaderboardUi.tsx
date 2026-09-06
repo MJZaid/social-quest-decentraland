@@ -82,6 +82,37 @@ const HEADER_BORDER_RADIUS = { topLeft: PANEL_BORDER_RADIUS, topRight: PANEL_BOR
 /** Small radius on the current player's row highlight only - self-contained, no adjacent siblings depend on its edges lining up, so no seam risk like the panel/header pairing above. */
 const ROW_HIGHLIGHT_BORDER_RADIUS = 10
 
+/** Height of one main tab button (SOCIAL POINTS / TOP MATCHES). */
+const TAB_HEIGHT = 40
+/** Rounds the active tab's own background pill - independent of PANEL_BORDER_RADIUS, this is a small self-contained shape with no adjacent seam to line up with. */
+const TAB_BORDER_RADIUS = 10
+/** Height of one Top Matches subtab button (THIS WEEK / ALL TIME) - deliberately shorter than TAB_HEIGHT so this row reads as a secondary control, never a second main tab bar. Tall enough to fit its label plus the small active-underline below it (see SUBTAB_UNDERLINE_HEIGHT). */
+const SUBTAB_HEIGHT = 30
+/** Width/height of the subtle underline mark below an active subtab's label - the ONLY thing that distinguishes active from inactive here besides the label's own color (see TopMatchesSubtabButton). Always rendered, only its color toggles (transparent when inactive) - so switching subtabs never shifts layout. Deliberately not a real border (uiTransform's borderWidth/borderColor apply to all four sides at once, with no per-side control in this SDK) - a small separate rectangle achieves the same "underline" look without that limitation. */
+const SUBTAB_UNDERLINE_WIDTH = 44
+const SUBTAB_UNDERLINE_HEIGHT = 2
+
+/**
+ * Which main section of the Leaderboard panel is showing - module-level state,
+ * same pattern as leaderboardOpen below (no React hooks in this file). Reset
+ * to its default every time the panel is opened (see LeaderboardButton), not
+ * when it's closed - so a still-open panel that gets reopened via the HUD
+ * button always starts back on SOCIAL POINTS, but a tab switch mid-session is
+ * never silently undone by anything else.
+ */
+type LeaderboardTab = 'socialPoints' | 'topMatches'
+let leaderboardTab: LeaderboardTab = 'socialPoints'
+
+/**
+ * Which Top Matches ranking is showing - only meaningful while
+ * leaderboardTab === 'topMatches', but kept as its own persistent module
+ * variable (not reset when leaving the Top Matches tab) so switching back to
+ * it remembers the last subtab chosen this session. Reset to its default
+ * alongside leaderboardTab on open - see LeaderboardButton.
+ */
+type TopMatchesSubtab = 'thisWeek' | 'allTime'
+let topMatchesSubtab: TopMatchesSubtab = 'thisWeek'
+
 /** Whether the Leaderboard overlay is open - same role/lifecycle as ui.tsx's own socialAgendaOpen (presentation-only, local, never synced), mutually exclusive with it since both are centered overlays occupying the same screen region. Default: closed. Deliberately not exported directly - see isLeaderboardOpen/openLeaderboard/closeLeaderboard below. */
 let leaderboardOpen = false
 
@@ -136,9 +167,11 @@ export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () 
                 // Covers ANSWER LOCKED and the pre-round COUNTDOWN too - same reasoning as SocialAgendaButton above.
                 const phase = roundManager.getSnapshot().phase
                 if (phase === 'answering' || phase === 'countdown') return
+                leaderboardTab = 'socialPoints' // always reopen on the default tab - see leaderboardTab's own doc comment
+                topMatchesSubtab = 'thisWeek'
                 leaderboardOpen = true
                 onOpen() // mutually exclusive centered overlays - see this component's own doc comment
-                requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer
+                requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer - Top Matches has no network yet, see TopMatchesPlaceholder
             }}
         >
             <Label value="✦" fontSize={wide ? 22 : 18} color={Color4.create(1, 0.85, 0.2, 1)} />
@@ -191,6 +224,8 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
                 <Label value="✕" fontSize={22} color={SOCIAL_PINK} />
             </UiEntity>
 
+            <LeaderboardTabBar />
+
             <UiEntity
                 uiTransform={{
                     flexDirection: 'column',
@@ -199,20 +234,130 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
                     padding: { top: 16, bottom: 20, left: 20, right: 20 }
                 }}
             >
-                {response === null ? (
-                    <Label value="Loading leaderboard..." fontSize={18} color={MUTED} />
-                ) : response.status === 'hydrating' ? (
-                    <Label
-                        value="The leaderboard is still starting up. Try again in a few seconds."
-                        fontSize={16}
-                        textAlign="middle-center"
-                        textWrap="wrap"
-                        color={MUTED}
-                    />
+                {leaderboardTab === 'socialPoints' ? (
+                    response === null ? (
+                        <Label value="Loading leaderboard..." fontSize={18} color={MUTED} />
+                    ) : response.status === 'hydrating' ? (
+                        <Label
+                            value="The leaderboard is still starting up. Try again in a few seconds."
+                            fontSize={16}
+                            textAlign="middle-center"
+                            textWrap="wrap"
+                            color={MUTED}
+                        />
+                    ) : (
+                        <LeaderboardReadyContent response={response} wide={wide} />
+                    )
                 ) : (
-                    <LeaderboardReadyContent response={response} wide={wide} />
+                    <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1 }}>
+                        <TopMatchesSubtabBar />
+                        <TopMatchesPlaceholder subtab={topMatchesSubtab} />
+                    </UiEntity>
                 )}
             </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * Main section switch (SOCIAL POINTS / TOP MATCHES) - two equal-width tap
+ * targets below the header, above the stable content zone (see
+ * LEADERBOARD_CONTENT_MIN_HEIGHT_WIDE/COMPACT). Switching tabs is pure local
+ * state - no network request of any kind (Top Matches has none yet at all;
+ * Social Points already has its own fresh data from the panel's own open -
+ * see LeaderboardButton). Active tab: a subtle pink pill (ROW_HIGHLIGHT -
+ * same color already used for the current player's row, reused rather than
+ * inventing a new one) with cream text. Inactive: no background, muted text.
+ */
+const LeaderboardTabBar = () => {
+    return (
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', padding: { top: 4, left: 20, right: 20 } }}>
+            <LeaderboardTabButton label="SOCIAL POINTS" active={leaderboardTab === 'socialPoints'} onClick={() => (leaderboardTab = 'socialPoints')} />
+            <UiEntity uiTransform={{ width: 8 }} />
+            <LeaderboardTabButton label="TOP MATCHES" active={leaderboardTab === 'topMatches'} onClick={() => (leaderboardTab = 'topMatches')} />
+        </UiEntity>
+    )
+}
+
+const LeaderboardTabButton = ({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) => {
+    return (
+        <UiEntity
+            uiTransform={{
+                flexGrow: 1,
+                height: TAB_HEIGHT,
+                justifyContent: 'center',
+                alignItems: 'center',
+                borderRadius: active ? TAB_BORDER_RADIUS : undefined
+            }}
+            uiBackground={active ? { color: ROW_HIGHLIGHT } : undefined}
+            onMouseDown={onClick}
+        >
+            <Label value={label} fontSize={14} color={active ? CREAM : MUTED} />
+        </UiEntity>
+    )
+}
+
+/**
+ * Secondary switch (THIS WEEK / ALL TIME), only rendered while
+ * leaderboardTab === 'topMatches'. Deliberately lighter than
+ * LeaderboardTabBar above - no background pill, just a color change on the
+ * label plus a small underline mark (see SUBTAB_UNDERLINE_WIDTH/HEIGHT) - so
+ * this never reads as a second main tab bar, only as a refinement within the
+ * already-selected Top Matches section.
+ */
+const TopMatchesSubtabBar = () => {
+    return (
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center', margin: { bottom: 10 } }}>
+            <TopMatchesSubtabButton label="THIS WEEK" active={topMatchesSubtab === 'thisWeek'} onClick={() => (topMatchesSubtab = 'thisWeek')} />
+            <UiEntity uiTransform={{ width: 24 }} />
+            <TopMatchesSubtabButton label="ALL TIME" active={topMatchesSubtab === 'allTime'} onClick={() => (topMatchesSubtab = 'allTime')} />
+        </UiEntity>
+    )
+}
+
+const TopMatchesSubtabButton = ({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) => {
+    return (
+        <UiEntity
+            uiTransform={{ height: SUBTAB_HEIGHT, flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}
+            onMouseDown={onClick}
+        >
+            <Label value={label} fontSize={13} color={active ? SOCIAL_PINK : MUTED} />
+            <UiEntity
+                uiTransform={{ width: SUBTAB_UNDERLINE_WIDTH, height: SUBTAB_UNDERLINE_HEIGHT, margin: { top: 4 }, borderRadius: 1 }}
+                uiBackground={active ? { color: SOCIAL_PINK } : undefined}
+            />
+        </UiEntity>
+    )
+}
+
+/**
+ * Temporary placeholder for Top Matches - no network wired yet (see this
+ * file's own history / the current phase's scope), so this never calls
+ * anything from leaderboardNetwork.ts or reads any ranking. Centered in the
+ * remaining space of the stable content zone (flexGrow:1 on its parent, see
+ * LeaderboardPanel), one title line (cream, larger) plus one muted secondary
+ * line - nothing else. No "TOP MATCHES — ..." repeated here on purpose: the
+ * active main tab and subtab already say that, so this only needs to say
+ * what's currently empty and why.
+ *
+ * The bottom margin on the copy line is a deliberate centering trick, not
+ * spacing for its own sake: this whole block is vertically centered by its
+ * parent's justifyContent:'center' (see the return below), so padding added
+ * only at the bottom of the group shifts its visual center upward by half
+ * that amount - a ~12px lift here, requested to read less "dead center, low"
+ * and more naturally aligned with the tabs above it.
+ */
+const TopMatchesPlaceholder = ({ subtab }: { subtab: TopMatchesSubtab }) => {
+    const copy =
+        subtab === 'thisWeek'
+            ? 'Play together this week to discover your best matches.'
+            : 'Play together and build connections to discover your best matches.'
+
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <Label value="NO MATCHES YET" fontSize={18} color={CREAM} textAlign="middle-center" />
+            <UiEntity uiTransform={{ height: 10 }} />
+            <Label value={copy} fontSize={15} color={MUTED} textAlign="middle-center" textWrap="wrap" uiTransform={{ margin: { bottom: 26 } }} />
         </UiEntity>
     )
 }
