@@ -92,13 +92,35 @@ export function initTopMatchesNetworkServer(): void {
 // CLIENT SIDE
 // ---------------------------------------------------------------------------
 
-/** The most recently received response, or null before any has arrived this session - same single-slot pattern as leaderboardNetwork.ts's latestLeaderboardResponse. Deliberately ONE slot for both scopes (not one per scope): leaderboardUi.tsx is what decides whether this response is still relevant to what's currently showing (see its own doc comment on why a scope/page mismatch there means "still loading", never "show it anyway"). */
-let latestTopMatchesResponse: TopMatchesResponse | null = null
+/**
+ * Confirmed responses, cached per (scope, page) - NOT a single "latest of
+ * either scope/page" slot. This exists because this module now has TWO
+ * independent, concurrent consumers: leaderboardUi.tsx's 2D panel (whatever
+ * scope/page the player currently has open) and leaderboardDisplay3D.ts's
+ * permanent sign (always thisWeek page 0 + allTime page 0, on its own timer,
+ * regardless of what the 2D panel is showing). A single shared slot would
+ * mean the sign's own periodic request for e.g. allTime page 0 could
+ * overwrite what the 2D panel just fetched for allTime page 1 - the panel's
+ * own scope/page match check (see leaderboardUi.tsx's TopMatchesSection)
+ * would then never see ITS page's data again, since every future refresh
+ * from the sign keeps clobbering that one shared slot with page 0. Keying by
+ * (scope, page) instead means each consumer only ever reads and overwrites
+ * its OWN cache entry - two different keys can never collide, and a
+ * response for one is never visible to a caller asking for the other. Not
+ * bounded/evicted: in practice this is at most 2 scopes x a small number of
+ * distinct pages any client ever actually requests in a session, nowhere
+ * near a real memory concern.
+ */
+const responseCache = new Map<string, TopMatchesResponse>()
+
+function cacheKey(scope: TopMatchesScope, page: number): string {
+    return `${scope}:${page}`
+}
 
 export function initTopMatchesNetworkClient(): void {
     topMatchesRoom.onMessage('topMatchesResponse', (data) => {
         if (data.status !== 'ready' && data.status !== 'hydrating') {
-            console.error(`[TopMatches][CLIENT] topMatchesResponse had an unexpected status '${data.status}' - ignoring, latestTopMatchesResponse unchanged`)
+            console.error(`[TopMatches][CLIENT] topMatchesResponse had an unexpected status '${data.status}' - ignoring, cache unchanged`)
             return
         }
 
@@ -110,27 +132,31 @@ export function initTopMatchesNetworkClient(): void {
             return
         }
 
+        const scope = normalizeScope(data.scope)
         // Out-of-range-page correction (the ranking shrank while a deeper page
         // was requested) is handled entirely by leaderboardUi.tsx, the one
         // place that also owns "which page does the UI currently want" - see
         // its own doc comment on TopMatchesSection. This layer only stores
-        // whatever the server sent, unmodified.
-        latestTopMatchesResponse = {
-            scope: normalizeScope(data.scope),
+        // whatever the server sent, unmodified, under the (scope, page) it
+        // actually reports - never under whatever page a caller originally
+        // asked for, in case those ever disagreed.
+        responseCache.set(cacheKey(scope, data.page), {
+            scope,
             status: data.status,
             page: data.page,
             pageSize: data.pageSize,
             totalPairs: data.totalPairs,
             rows
-        }
+        })
     })
 }
 
-/** Explicit request only - never on a tick/timer. `page` is always 0-based. */
+/** Explicit request only - never on a tick/timer from this module itself (leaderboardDisplay3D.ts owns its own timer, same as leaderboardUi.tsx owns its own click-driven requests). `page` is always 0-based. */
 export function requestTopMatches(scope: TopMatchesScope, page: number): void {
     topMatchesRoom.send('requestTopMatches', { scope, page, pageSize: TOP_MATCHES_PAGE_SIZE })
 }
 
-export function getLatestTopMatchesResponse(): TopMatchesResponse | null {
-    return latestTopMatchesResponse
+/** The last confirmed response for this exact (scope, page), or null if none has arrived yet this session - see responseCache's own doc comment for why this is keyed rather than a single shared slot. */
+export function getTopMatchesResponse(scope: TopMatchesScope, page: number): TopMatchesResponse | null {
+    return responseCache.get(cacheKey(scope, page)) ?? null
 }

@@ -4,7 +4,7 @@ import { roundManager } from './roundManager'
 import { requestLeaderboard, getLatestLeaderboardResponse, LeaderboardResponse } from './leaderboardNetwork'
 import { LeaderboardRankedEntry } from './leaderboardRanking'
 import { TopMatchesScope } from './topMatchesMessages'
-import { requestTopMatches, getLatestTopMatchesResponse, TopMatchesResponse } from './topMatchesNetwork'
+import { requestTopMatches, getTopMatchesResponse, TopMatchesResponse } from './topMatchesNetwork'
 import { TopMatchRankedEntry } from './topMatchesRanking'
 
 // -----------------------------------------------------------------------
@@ -420,28 +420,29 @@ const TopMatchesLoading = () => {
  * either the loading state, the approved empty placeholder, or ranked rows +
  * footer for the current page.
  *
- * getLatestTopMatchesResponse() is a SINGLE slot shared by both scopes (see
- * topMatchesNetwork.ts's own doc comment) - a response only counts as "the
- * one to show" when its own scope AND page exactly match what THIS render
- * currently wants (topMatchesSubtab/topMatchesPage). Any mismatch (wrong
- * scope mid-switch, a still-in-flight page change, or no response at all
- * yet) falls back to the loading state - this is what guarantees a THIS WEEK
- * response can never flash under ALL TIME (or vice versa), and that changing
- * page never shows the previous page's rows for even one frame.
+ * getTopMatchesResponse(scope, page) reads a cache keyed by exactly that pair
+ * (see topMatchesNetwork.ts's own doc comment) - this panel only ever reads
+ * its OWN (topMatchesSubtab, topMatchesPage) entry, which leaderboardDisplay3D.ts's
+ * independent periodic requests (always thisWeek/allTime page 0) can never
+ * overwrite, since they write to their own separate cache keys. A null read
+ * (nothing cached yet for this exact scope/page) falls back to the loading
+ * state - this is what guarantees a THIS WEEK response can never flash under
+ * ALL TIME (or vice versa), and that changing page never shows the previous
+ * page's rows for even one frame.
  *
- * The one exception is the out-of-range-page correction: if a matching
- * response's own page is beyond what its totalPairs actually supports (the
- * ranking shrank while sitting on a deeper page), this clamps topMatchesPage
- * down and re-requests - but that mutation immediately breaks the
- * scope/page match check above for every subsequent frame until the
- * corrected response arrives, so this branch can only ever fire once per
- * stale response, never every frame - there is no separate guard variable
- * needed for that.
+ * The one exception is the out-of-range-page correction: if the response for
+ * this exact scope/page reports a page beyond what its totalPairs actually
+ * supports (the ranking shrank while sitting on a deeper page), this clamps
+ * topMatchesPage down and re-requests - but that mutation immediately makes
+ * this component look up a DIFFERENT cache key for every subsequent frame
+ * until the corrected response arrives, so this branch can only ever fire
+ * once per stale response, never every frame - there is no separate guard
+ * variable needed for that.
  */
 const TopMatchesSection = ({ wide }: { wide: boolean }) => {
-    const response = getLatestTopMatchesResponse()
+    const response = getTopMatchesResponse(topMatchesSubtab, topMatchesPage)
 
-    if (response !== null && response.scope === topMatchesSubtab && response.page === topMatchesPage && response.status === 'ready') {
+    if (response !== null && response.status === 'ready') {
         const totalPages = Math.max(1, Math.ceil(response.totalPairs / response.pageSize))
         if (topMatchesPage > totalPages - 1) {
             topMatchesPage = totalPages - 1
