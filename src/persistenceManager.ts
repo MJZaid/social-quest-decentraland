@@ -589,6 +589,11 @@ async function awardFriendshipBonuses(address: string, dueBonuses: DueFriendship
         }
 
         socialPointsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
+        // Keeps the leaderboard mirror converging on live Friendship bonuses, not
+        // just live validRounds - same absolute-snapshot contract as
+        // applySocialPointsEvent's own call, own separate trigger. See
+        // scheduleLeaderboardSync's own doc comment.
+        scheduleLeaderboardSync(address, candidate.validRounds, candidate.friendshipBonusPoints, resolveObservedDisplayName(address))
         return true
     })
 }
@@ -822,6 +827,48 @@ async function reconcileTopMatchesForAddress(
 }
 
 /**
+ * Progressive, per-player backfill for the leaderboard mirror - called once
+ * per requestProfile (i.e. once per player connect/reconnect), fire-and-
+ * forget, never blocking the profileResponse above. This is what repairs an
+ * entry written before friendshipBonusPoints existed on the mirror (sanitized
+ * to 0 by leaderboardSchema.ts) without a global sweep of every player: each
+ * returning player's own connect naturally converges their own entry to the
+ * real Social Points profile, one player at a time, no new retry
+ * infrastructure needed - a stale entry simply gets fixed the next time that
+ * player happens to reconnect.
+ *
+ * Reuses loadSocialPointsProfile()'s own cache/in-flight dedupe (see that
+ * function's doc comment) rather than issuing its own Storage.player.get -
+ * this never causes a second concurrent read for the same address even when
+ * awardFriendshipBonuses' own internal load (inside a same-tick
+ * reconcileFriendshipBonuses sweep) is racing this exact call; both share the
+ * same cache entry or in-flight promise.
+ *
+ * Skips entirely when the Social Points read itself failed - per this file's
+ * data-integrity invariant (loadSocialPointsProfile's own doc comment), a
+ * failed read must never be treated as "friendshipBonusPoints is 0": doing so
+ * would overwrite a returning player's real bonus history with a false zero
+ * on the mirror the moment Storage had one bad read. A later requestProfile
+ * (this player's next reconnect) gets a genuinely fresh attempt.
+ *
+ * Also skips when the profile has nothing to show yet (validRounds === 0 AND
+ * friendshipBonusPoints === 0) - a brand new player who has never played a
+ * round has never had a leaderboard entry either (scheduleLeaderboardSync is
+ * otherwise only ever called after a real round or bonus), and this backfill
+ * is not meant to start creating zero-value entries for every connect.
+ */
+async function reconcileLeaderboardSnapshot(address: string): Promise<void> {
+    const { profile, loadedSuccessfully } = await loadSocialPointsProfile(address)
+    if (!loadedSuccessfully) {
+        console.error(`[Leaderboard][SERVER] Snapshot reconciliation skipped for ${address} - Social Points profile failed to load this attempt, eligible for retry on a later requestProfile`)
+        return
+    }
+    if (profile.validRounds === 0 && profile.friendshipBonusPoints === 0) return
+
+    scheduleLeaderboardSync(address, profile.validRounds, profile.friendshipBonusPoints, resolveObservedDisplayName(address))
+}
+
+/**
  * Loads `address`'s Social Points profile with the same LOADED/MISSING vs
  * FAILED distinction as loadProfile() (Connections) above - see that
  * function's own doc comment for the full data-integrity invariant this
@@ -941,7 +988,7 @@ async function applySocialPointsEvent(address: string, eventId: string, observed
         }
 
         socialPointsProfiles.set(address, candidate) // commit - only now does this become the canonical profile
-        scheduleLeaderboardSync(address, candidate.validRounds, observedDisplayName)
+        scheduleLeaderboardSync(address, candidate.validRounds, candidate.friendshipBonusPoints, observedDisplayName)
         return 'SAVED'
     })
 }
@@ -1047,6 +1094,8 @@ export function initPersistenceServer(): void {
             void reconcileFriendshipBonuses(address, profile, loadedSuccessfully)
             // Same reasoning, own separate domain - see reconcileTopMatchesForAddress's own doc comment.
             void reconcileTopMatchesForAddress(address, profile, loadedSuccessfully)
+            // Own separate domain again (Social Points, not Connections) - see reconcileLeaderboardSnapshot's own doc comment.
+            void reconcileLeaderboardSnapshot(address)
         } catch (err) {
             console.error(`[Persistence][SERVER] requestProfile handling failed: ${err instanceof Error ? err.message : String(err)}`)
             persistenceRoom.send('profileResponse', { found: false, dataJson: '', error: 'load_failed', serverSessionId: SERVER_SESSION_ID }, { to: [context.from] })

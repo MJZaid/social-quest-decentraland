@@ -1,15 +1,17 @@
 import { PersistedLeaderboardEntryV1 } from './leaderboardSchema'
 import { getLeaderboardCacheSnapshot, isLeaderboardFullyLoaded } from './leaderboardManager'
-import { getSocialPoints, getQuestProgress, normalizeUserId } from './persistenceSchema'
+import { getTotalSocialPoints, normalizeUserId } from './persistenceSchema'
 
 // -----------------------------------------------------------------------
-// LEADERBOARD RANKING (Phase 2B-1) - a pure, read-only derivation layer on
-// top of Phase 2A's confirmed leaderboardEntries cache. No Storage access,
-// no client messages, no mutation of anything - every export here is a
-// plain function from the current cache snapshot to a freshly-built DTO.
-// rank/socialPoints/questProgress are NEVER persisted anywhere (same
-// discipline as leaderboardSchema.ts/persistenceSchema.ts) - they exist
-// only in the DTOs this file returns.
+// LEADERBOARD RANKING (Social Points v2) - a pure, read-only derivation layer
+// on top of the confirmed leaderboardEntries cache. No Storage access, no
+// client messages, no mutation of anything - every export here is a plain
+// function from the current cache snapshot to a freshly-built DTO.
+// rank/socialPoints are NEVER persisted anywhere (same discipline as
+// leaderboardSchema.ts/persistenceSchema.ts) - they exist only in the DTOs
+// this file returns. socialPoints is the v2 total (validRounds +
+// friendshipBonusPoints, getTotalSocialPoints) - the old tier-based
+// getSocialPoints/questProgress are no longer used by this flow.
 // -----------------------------------------------------------------------
 
 /** Presentation-only fallback for a player whose canonical entry has no observed name yet - never written back to Storage or to the canonical entry, only ever appears inside a DTO built here. */
@@ -24,7 +26,6 @@ export interface LeaderboardRankedEntry {
     displayName: string
     validRounds: number
     socialPoints: number
-    questProgress: number
 }
 
 export interface LeaderboardSnapshot {
@@ -45,8 +46,12 @@ function toDisplayName(entry: PersistedLeaderboardEntryV1): string {
     return trimmed && trimmed.length > 0 ? trimmed : DISPLAY_NAME_FALLBACK
 }
 
-/** Canonical order: validRounds DESC, userId ASC as a deterministic tiebreak - never socialPoints, which collapses distinct progress (44 rounds and 40 rounds can both be 800 SP) into ties that would otherwise need their own arbitrary tiebreak. */
-function compareEntries(a: PersistedLeaderboardEntryV1, b: PersistedLeaderboardEntryV1): number {
+/** A ranked entry before its final position is known - rank is only ever assigned once, after sorting (see buildRankedLeaderboardSnapshot). Mirrors topMatchesRanking.ts's own RankableTopMatch shape. */
+type RankableLeaderboardEntry = Omit<LeaderboardRankedEntry, 'rank'>
+
+/** Canonical order (product-approved): socialPoints DESC (the v2 total - validRounds + friendshipBonusPoints), then validRounds DESC as a tiebreak between two players with the same total (e.g. one earned theirs mostly from rounds, another mostly from Friendship bonuses), then userId ASC as the final deterministic tiebreak. */
+function compareRankedEntries(a: RankableLeaderboardEntry, b: RankableLeaderboardEntry): number {
+    if (b.socialPoints !== a.socialPoints) return b.socialPoints - a.socialPoints
     if (b.validRounds !== a.validRounds) return b.validRounds - a.validRounds
     if (a.userId < b.userId) return -1
     if (a.userId > b.userId) return 1
@@ -54,30 +59,26 @@ function compareEntries(a: PersistedLeaderboardEntryV1, b: PersistedLeaderboardE
 }
 
 /**
- * Sorts the given entries exactly once and derives rank (ordinal, 1-based,
- * no ties/dense-ranking/tiers - see compareEntries) plus socialPoints/
- * questProgress (reusing Phase 1's getSocialPoints/getQuestProgress, never
- * reimplementing the formula) for each. Pure: `entries` is never mutated,
- * and every returned object is a brand-new DTO - the canonical
+ * Sorts the given entries exactly once and derives rank (ordinal, 1-based, no
+ * ties/dense-ranking) plus socialPoints (getTotalSocialPoints - the v2 total,
+ * never the old tier formula) for each. Pure: `entries` is never mutated, and
+ * every returned object is a brand-new DTO - the canonical
  * PersistedLeaderboardEntryV1 objects are never handed out or written into.
  *
  * Exported so a single logical query needing BOTH a Top N slice and one
- * player's position (Phase 2B-2's combined request, not built yet) can call
- * this exactly once and derive both from the same ranked array - see
- * getTopLeaderboardEntries/getPlayerLeaderboardPosition below for the
- * single-purpose shape this same building block already backs.
+ * player's position can call this exactly once and derive both from the same
+ * ranked array - see getTopLeaderboardEntries/getPlayerLeaderboardPosition
+ * below for the single-purpose shape this same building block already backs.
  */
 export function buildRankedLeaderboardSnapshot(entries: PersistedLeaderboardEntryV1[]): LeaderboardRankedEntry[] {
-    return [...entries]
-        .sort(compareEntries)
-        .map((entry, index) => ({
-            rank: index + 1,
-            userId: entry.userId,
-            displayName: toDisplayName(entry),
-            validRounds: entry.validRounds,
-            socialPoints: getSocialPoints(entry.validRounds),
-            questProgress: getQuestProgress(entry.validRounds)
-        }))
+    const rankable: RankableLeaderboardEntry[] = entries.map((entry) => ({
+        userId: entry.userId,
+        displayName: toDisplayName(entry),
+        validRounds: entry.validRounds,
+        socialPoints: getTotalSocialPoints(entry.validRounds, entry.friendshipBonusPoints)
+    }))
+
+    return rankable.sort(compareRankedEntries).map((entry, index) => ({ rank: index + 1, ...entry }))
 }
 
 /**

@@ -99,9 +99,13 @@ async function flushOneLeaderboardEntry(userId: string): Promise<void> {
 /**
  * Entry point called ONLY after a player's Social Points profile has been
  * successfully SAVED (Storage.player.set confirmed) - never before, and
- * never on a mere dedupe/ALREADY_PROCESSED hit. Takes the ABSOLUTE canonical
- * validRounds, never a delta, so repeated or out-of-order calls always
- * converge on the latest true value, never accumulate.
+ * never on a mere dedupe/ALREADY_PROCESSED hit - OR from a progressive
+ * backfill read on connect (see persistenceManager.ts's
+ * reconcileLeaderboardSnapshot). Takes ABSOLUTE canonical snapshots of BOTH
+ * validRounds and friendshipBonusPoints, never deltas, so repeated or
+ * out-of-order calls (a round save, a Friendship bonus award, and a connect-
+ * time backfill can all fire independently) always converge on the same
+ * latest true state, never accumulate.
  *
  * observedDisplayName follows the same discipline as Connections'
  * resolveObservedDisplayName: server-observed only, never client-claimed. A
@@ -109,7 +113,7 @@ async function flushOneLeaderboardEntry(userId: string): Promise<void> {
  * is already known for this user - pending first, then cached - never
  * regressing to "no name" or an artificial fallback.
  */
-export function scheduleLeaderboardSync(userId: string, absoluteValidRounds: number, observedDisplayName: string | undefined): void {
+export function scheduleLeaderboardSync(userId: string, absoluteValidRounds: number, absoluteFriendshipBonusPoints: number, observedDisplayName: string | undefined): void {
     const existingPending = pendingLeaderboardSyncs.get(userId)
     const existingCached = leaderboardEntries.get(userId)
     const carriedName = observedDisplayName ?? existingPending?.lastKnownDisplayName ?? existingCached?.lastKnownDisplayName
@@ -118,6 +122,7 @@ export function scheduleLeaderboardSync(userId: string, absoluteValidRounds: num
         version: LEADERBOARD_SCHEMA_VERSION,
         userId,
         validRounds: absoluteValidRounds,
+        friendshipBonusPoints: absoluteFriendshipBonusPoints,
         ...(carriedName ? { lastKnownDisplayName: carriedName } : {})
     }
     pendingLeaderboardSyncs.set(userId, snapshot) // always coalesce to latest, even while a hydration attempt is in progress

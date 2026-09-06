@@ -9,16 +9,18 @@
 
 /**
  * One player's mirrored entry in the global scene-scoped leaderboard index.
- * Deliberately minimal, same discipline as PersistedSocialPointsProfileV1 in
- * persistenceSchema.ts: socialPoints/questProgress/rank are NEVER stored
- * here - all are pure derivations of validRounds (getSocialPoints/
- * getQuestProgress in persistenceSchema.ts), computed by callers, so this
- * index can never itself drift out of sync with its own derived numbers.
+ * validRounds and friendshipBonusPoints are the two raw counters mirrored
+ * straight from the canonical Social Points v2 profile (persistenceSchema.ts)
+ * - the derived total (socialPoints = validRounds + friendshipBonusPoints,
+ * getTotalSocialPoints) is NEVER stored here, always computed by callers
+ * (leaderboardRanking.ts), so this index can never itself drift out of sync
+ * with its own derived number.
  */
 export interface PersistedLeaderboardEntryV1 {
     version: 1
     userId: string
     validRounds: number
+    friendshipBonusPoints: number
     lastKnownDisplayName?: string
 }
 
@@ -50,10 +52,23 @@ export function sanitizeLeaderboardEntry(raw: unknown): PersistedLeaderboardEntr
     if (typeof value.userId !== 'string' || value.userId.trim().length === 0) return null
     if (!isFiniteNonNegativeInt(value.validRounds)) return null
 
+    // Additive field - absent on any entry written before the Social Points v2
+    // leaderboard migration. Defaults to 0 (no bonus known yet); repaired to
+    // the real value the next time this player connects - see
+    // persistenceManager.ts's reconcileLeaderboardSnapshot. A field that IS
+    // present but malformed is still rejected outright, same zero-tolerance
+    // stance as every other field here.
+    let friendshipBonusPoints = 0
+    if (value.friendshipBonusPoints !== undefined) {
+        if (!isFiniteNonNegativeInt(value.friendshipBonusPoints)) return null
+        friendshipBonusPoints = value.friendshipBonusPoints
+    }
+
     const entry: PersistedLeaderboardEntryV1 = {
         version: LEADERBOARD_SCHEMA_VERSION,
         userId: value.userId,
-        validRounds: value.validRounds
+        validRounds: value.validRounds,
+        friendshipBonusPoints
     }
     if (typeof value.lastKnownDisplayName === 'string') {
         const trimmed = value.lastKnownDisplayName.trim()
