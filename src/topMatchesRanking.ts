@@ -124,3 +124,30 @@ export function getTopMatches(limit: number): TopMatchesSnapshot {
     const ranked = buildRankedTopMatches(getTopMatchesCacheSnapshot(), ALL_TIME_MIN_SHARED_ANSWERS)
     return { status: 'ready', totalPairs: ranked.length, top: ranked.slice(0, clampTopN(limit)) }
 }
+
+/**
+ * One page of the ALL TIME ranking starting at `offset` - the pagination-safe
+ * counterpart to getTopMatches above. getTopMatches is capped at MAX_TOP_N
+ * (100) by clampTopN, which is exactly right for a "top N" read but makes
+ * pair #101 onward permanently unreachable through it - not acceptable once
+ * a caller needs real page-by-page navigation over however many eligible
+ * pairs actually exist (see topMatchesNetwork.ts, the caller this was added
+ * for). This calls buildRankedTopMatches exactly once, the SAME way
+ * getTopMatches does - no second ranking pass, same threshold
+ * (ALL_TIME_MIN_SHARED_ANSWERS), same sort order - and slices the FULL
+ * ranked array at `offset`, with no upper bound on how far `offset` can
+ * reach. Because buildRankedTopMatches assigns `rank` once, across the
+ * entire sorted array, before any slicing happens (see its own doc comment),
+ * every entry returned here still carries its correct GLOBAL rank (#101,
+ * #142, ...) - never renumbered relative to the page. `offset`/`pageSize`
+ * are trusted to already be sane non-negative integers - see
+ * topMatchesNetwork.ts's own sanitization, the only caller.
+ */
+export function getTopMatchesPage(offset: number, pageSize: number): TopMatchesSnapshot {
+    if (!isTopMatchesFullyLoaded()) {
+        return { status: 'hydrating', totalPairs: 0, top: [] }
+    }
+
+    const ranked = buildRankedTopMatches(getTopMatchesCacheSnapshot(), ALL_TIME_MIN_SHARED_ANSWERS)
+    return { status: 'ready', totalPairs: ranked.length, top: ranked.slice(offset, offset + pageSize) }
+}

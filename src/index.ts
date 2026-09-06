@@ -4,6 +4,7 @@ import { isServer } from '@dcl/sdk/network'
 import { setupUi } from './ui'
 import { initPersistenceClient, initPersistenceServer } from './persistenceManager'
 import { initLeaderboardNetworkClient, initLeaderboardNetworkServer } from './leaderboardNetwork'
+import { initTopMatchesNetworkClient, initTopMatchesNetworkServer } from './topMatchesNetwork'
 import { initLeaderboardDisplay3D } from './leaderboardDisplay3D'
 import { initPlayquestRotation } from './playquestRotation'
 
@@ -14,11 +15,13 @@ export function main() {
     if (isServer()) {
         initPersistenceServer()
         initLeaderboardNetworkServer()
+        initTopMatchesNetworkServer()
         return
     }
 
     initPersistenceClient()
     initLeaderboardNetworkClient()
+    initTopMatchesNetworkClient()
     setupUi()
     initLeaderboardDisplay3D()
     initPlayquestRotation()

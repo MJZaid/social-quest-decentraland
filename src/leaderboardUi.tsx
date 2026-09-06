@@ -3,6 +3,9 @@ import { Color4 } from '@dcl/sdk/math'
 import { roundManager } from './roundManager'
 import { requestLeaderboard, getLatestLeaderboardResponse, LeaderboardResponse } from './leaderboardNetwork'
 import { LeaderboardRankedEntry } from './leaderboardRanking'
+import { TopMatchesScope } from './topMatchesMessages'
+import { requestTopMatches, getLatestTopMatchesResponse, TopMatchesResponse } from './topMatchesNetwork'
+import { TopMatchRankedEntry } from './topMatchesRanking'
 
 // -----------------------------------------------------------------------
 // LEADERBOARD UI - extracted 1:1 from ui.tsx in an earlier phase (structural
@@ -108,10 +111,23 @@ let leaderboardTab: LeaderboardTab = 'socialPoints'
  * leaderboardTab === 'topMatches', but kept as its own persistent module
  * variable (not reset when leaving the Top Matches tab) so switching back to
  * it remembers the last subtab chosen this session. Reset to its default
- * alongside leaderboardTab on open - see LeaderboardButton.
+ * alongside leaderboardTab on open - see LeaderboardButton. Typed as
+ * TopMatchesScope (imported from topMatchesMessages.ts) rather than a
+ * separate local union - the two are the exact same concept (which ranking
+ * is being asked for), so reusing the network layer's own type keeps them
+ * from ever silently drifting apart.
  */
-type TopMatchesSubtab = 'thisWeek' | 'allTime'
-let topMatchesSubtab: TopMatchesSubtab = 'thisWeek'
+let topMatchesSubtab: TopMatchesScope = 'thisWeek'
+
+/**
+ * 0-based page currently requested/shown for whichever scope
+ * `topMatchesSubtab` is - reset to 0 whenever the panel opens, the main tab
+ * switches to Top Matches, or the subtab changes (see each of those
+ * respective onClick/onMouseDown handlers). Read by TopMatchesSection to
+ * decide whether the latest network response is still the one to show - see
+ * that component's own doc comment.
+ */
+let topMatchesPage = 0
 
 /** Whether the Leaderboard overlay is open - same role/lifecycle as ui.tsx's own socialAgendaOpen (presentation-only, local, never synced), mutually exclusive with it since both are centered overlays occupying the same screen region. Default: closed. Deliberately not exported directly - see isLeaderboardOpen/openLeaderboard/closeLeaderboard below. */
 let leaderboardOpen = false
@@ -169,9 +185,10 @@ export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () 
                 if (phase === 'answering' || phase === 'countdown') return
                 leaderboardTab = 'socialPoints' // always reopen on the default tab - see leaderboardTab's own doc comment
                 topMatchesSubtab = 'thisWeek'
+                topMatchesPage = 0
                 leaderboardOpen = true
                 onOpen() // mutually exclusive centered overlays - see this component's own doc comment
-                requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer - Top Matches has no network yet, see TopMatchesPlaceholder
+                requestLeaderboard(LEADERBOARD_TOP_N) // exactly once per open, never on a tick/timer - Top Matches is requested lazily, only once its tab is actually clicked (see LeaderboardTabButton), never here
             }}
         >
             <Label value="✦" fontSize={wide ? 22 : 18} color={Color4.create(1, 0.85, 0.2, 1)} />
@@ -249,10 +266,7 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
                         <LeaderboardReadyContent response={response} wide={wide} />
                     )
                 ) : (
-                    <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1 }}>
-                        <TopMatchesSubtabBar />
-                        <TopMatchesPlaceholder subtab={topMatchesSubtab} />
-                    </UiEntity>
+                    <TopMatchesSection wide={wide} />
                 )}
             </UiEntity>
         </UiEntity>
@@ -262,19 +276,31 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
 /**
  * Main section switch (SOCIAL POINTS / TOP MATCHES) - two equal-width tap
  * targets below the header, above the stable content zone (see
- * LEADERBOARD_CONTENT_MIN_HEIGHT_WIDE/COMPACT). Switching tabs is pure local
- * state - no network request of any kind (Top Matches has none yet at all;
- * Social Points already has its own fresh data from the panel's own open -
- * see LeaderboardButton). Active tab: a subtle pink pill (ROW_HIGHLIGHT -
- * same color already used for the current player's row, reused rather than
- * inventing a new one) with cream text. Inactive: no background, muted text.
+ * LEADERBOARD_CONTENT_MIN_HEIGHT_WIDE/COMPACT). Switching TO Social Points
+ * requests nothing (it already has its own fresh data from the panel's own
+ * open - see LeaderboardButton). Switching TO Top Matches resets the page to
+ * 0 and requests the currently-selected subtab's scope fresh every time this
+ * tab is clicked - never lazily "only the first time", so reopening this tab
+ * after gameplay has moved on always shows current data, not a stale
+ * snapshot from whenever it was last visited. Active tab: a subtle pink pill
+ * (ROW_HIGHLIGHT - same color already used for the current player's row,
+ * reused rather than inventing a new one) with cream text. Inactive: no
+ * background, muted text.
  */
 const LeaderboardTabBar = () => {
     return (
         <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', padding: { top: 4, left: 20, right: 20 } }}>
             <LeaderboardTabButton label="SOCIAL POINTS" active={leaderboardTab === 'socialPoints'} onClick={() => (leaderboardTab = 'socialPoints')} />
             <UiEntity uiTransform={{ width: 8 }} />
-            <LeaderboardTabButton label="TOP MATCHES" active={leaderboardTab === 'topMatches'} onClick={() => (leaderboardTab = 'topMatches')} />
+            <LeaderboardTabButton
+                label="TOP MATCHES"
+                active={leaderboardTab === 'topMatches'}
+                onClick={() => {
+                    leaderboardTab = 'topMatches'
+                    topMatchesPage = 0
+                    requestTopMatches(topMatchesSubtab, topMatchesPage)
+                }}
+            />
         </UiEntity>
     )
 }
@@ -303,14 +329,23 @@ const LeaderboardTabButton = ({ label, active, onClick }: { label: string; activ
  * LeaderboardTabBar above - no background pill, just a color change on the
  * label plus a small underline mark (see SUBTAB_UNDERLINE_WIDTH/HEIGHT) - so
  * this never reads as a second main tab bar, only as a refinement within the
- * already-selected Top Matches section.
+ * already-selected Top Matches section. Clicking either one - even the
+ * already-active one - resets the page to 0 and requests that scope fresh,
+ * same "always current, never cached-is-good-enough" discipline as the main
+ * tab bar and LeaderboardButton.
  */
 const TopMatchesSubtabBar = () => {
+    const selectSubtab = (scope: TopMatchesScope) => {
+        topMatchesSubtab = scope
+        topMatchesPage = 0
+        requestTopMatches(scope, topMatchesPage)
+    }
+
     return (
         <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center', margin: { bottom: 10 } }}>
-            <TopMatchesSubtabButton label="THIS WEEK" active={topMatchesSubtab === 'thisWeek'} onClick={() => (topMatchesSubtab = 'thisWeek')} />
+            <TopMatchesSubtabButton label="THIS WEEK" active={topMatchesSubtab === 'thisWeek'} onClick={() => selectSubtab('thisWeek')} />
             <UiEntity uiTransform={{ width: 24 }} />
-            <TopMatchesSubtabButton label="ALL TIME" active={topMatchesSubtab === 'allTime'} onClick={() => (topMatchesSubtab = 'allTime')} />
+            <TopMatchesSubtabButton label="ALL TIME" active={topMatchesSubtab === 'allTime'} onClick={() => selectSubtab('allTime')} />
         </UiEntity>
     )
 }
@@ -331,23 +366,24 @@ const TopMatchesSubtabButton = ({ label, active, onClick }: { label: string; act
 }
 
 /**
- * Temporary placeholder for Top Matches - no network wired yet (see this
- * file's own history / the current phase's scope), so this never calls
- * anything from leaderboardNetwork.ts or reads any ranking. Centered in the
- * remaining space of the stable content zone (flexGrow:1 on its parent, see
- * LeaderboardPanel), one title line (cream, larger) plus one muted secondary
- * line - nothing else. No "TOP MATCHES — ..." repeated here on purpose: the
- * active main tab and subtab already say that, so this only needs to say
- * what's currently empty and why.
+ * Empty state for Top Matches - shown by TopMatchesSection when the current
+ * scope's response is confirmed ready but totalPairs === 0. This is a real
+ * "nothing eligible yet" result, not a loading state - the manager's own
+ * threshold filter (5 shared answers THIS WEEK, 20 ALL TIME) already decided
+ * that, and this component never re-checks or duplicates that logic; it only
+ * renders the approved copy. One title line (cream, larger) plus one muted
+ * secondary line - nothing else. No "TOP MATCHES — ..." repeated here on
+ * purpose: the active main tab and subtab already say that, so this only
+ * needs to say what's currently empty and why.
  *
  * The bottom margin on the copy line is a deliberate centering trick, not
  * spacing for its own sake: this whole block is vertically centered by its
  * parent's justifyContent:'center' (see the return below), so padding added
  * only at the bottom of the group shifts its visual center upward by half
- * that amount - a ~12px lift here, requested to read less "dead center, low"
- * and more naturally aligned with the tabs above it.
+ * that amount - a ~12px lift, so it reads less "dead center, low" and more
+ * naturally aligned with the tabs above it.
  */
-const TopMatchesPlaceholder = ({ subtab }: { subtab: TopMatchesSubtab }) => {
+const TopMatchesPlaceholder = ({ subtab }: { subtab: TopMatchesScope }) => {
     const copy =
         subtab === 'thisWeek'
             ? 'Play together this week to discover your best matches.'
@@ -358,6 +394,186 @@ const TopMatchesPlaceholder = ({ subtab }: { subtab: TopMatchesSubtab }) => {
             <Label value="NO MATCHES YET" fontSize={18} color={CREAM} textAlign="middle-center" />
             <UiEntity uiTransform={{ height: 10 }} />
             <Label value={copy} fontSize={15} color={MUTED} textAlign="middle-center" textWrap="wrap" uiTransform={{ margin: { bottom: 26 } }} />
+        </UiEntity>
+    )
+}
+
+/**
+ * Discreet loading state for Top Matches - covers every "not ready to show
+ * rows yet" case at once (no response for this scope/page yet, a scope/page
+ * switch still in flight, or the manager's own status:'hydrating') per this
+ * phase's own "show loading, never stale data from another scope" direction.
+ * Deliberately the SAME visual weight/tone as Social Points' own "Loading
+ * leaderboard..." state (MUTED, no spinner/animation) rather than inventing a
+ * new loading treatment for this one tab.
+ */
+const TopMatchesLoading = () => {
+    return (
+        <UiEntity uiTransform={{ width: '100%', flexGrow: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <Label value="LOADING MATCHES..." fontSize={16} color={MUTED} textAlign="middle-center" />
+        </UiEntity>
+    )
+}
+
+/**
+ * Content for the TOP MATCHES tab - the subtab bar is always rendered, then
+ * either the loading state, the approved empty placeholder, or ranked rows +
+ * footer for the current page.
+ *
+ * getLatestTopMatchesResponse() is a SINGLE slot shared by both scopes (see
+ * topMatchesNetwork.ts's own doc comment) - a response only counts as "the
+ * one to show" when its own scope AND page exactly match what THIS render
+ * currently wants (topMatchesSubtab/topMatchesPage). Any mismatch (wrong
+ * scope mid-switch, a still-in-flight page change, or no response at all
+ * yet) falls back to the loading state - this is what guarantees a THIS WEEK
+ * response can never flash under ALL TIME (or vice versa), and that changing
+ * page never shows the previous page's rows for even one frame.
+ *
+ * The one exception is the out-of-range-page correction: if a matching
+ * response's own page is beyond what its totalPairs actually supports (the
+ * ranking shrank while sitting on a deeper page), this clamps topMatchesPage
+ * down and re-requests - but that mutation immediately breaks the
+ * scope/page match check above for every subsequent frame until the
+ * corrected response arrives, so this branch can only ever fire once per
+ * stale response, never every frame - there is no separate guard variable
+ * needed for that.
+ */
+const TopMatchesSection = ({ wide }: { wide: boolean }) => {
+    const response = getLatestTopMatchesResponse()
+
+    if (response !== null && response.scope === topMatchesSubtab && response.page === topMatchesPage && response.status === 'ready') {
+        const totalPages = Math.max(1, Math.ceil(response.totalPairs / response.pageSize))
+        if (topMatchesPage > totalPages - 1) {
+            topMatchesPage = totalPages - 1
+            requestTopMatches(topMatchesSubtab, topMatchesPage)
+        } else {
+            return (
+                <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1 }}>
+                    <TopMatchesSubtabBar />
+                    {response.totalPairs === 0 ? (
+                        <TopMatchesPlaceholder subtab={topMatchesSubtab} />
+                    ) : (
+                        <TopMatchesReadyContent response={response} totalPages={totalPages} wide={wide} />
+                    )}
+                </UiEntity>
+            )
+        }
+    }
+
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1 }}>
+            <TopMatchesSubtabBar />
+            <TopMatchesLoading />
+        </UiEntity>
+    )
+}
+
+/**
+ * The current page's ranked rows plus an optional PREV/1-of-N/NEXT footer -
+ * only reached once TopMatchesSection has already confirmed the response
+ * matches the current scope/page and totalPairs > 0. `totalPages` is passed
+ * in rather than recomputed here - already derived once by the caller from
+ * this same response, no reason to compute it twice.
+ */
+const TopMatchesReadyContent = ({ response, totalPages, wide }: { response: TopMatchesResponse; totalPages: number; wide: boolean }) => {
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%' }}>
+            {response.rows.map((entry) => (
+                <UiEntity key={entry.pairKey} uiTransform={{ width: '100%' }}>
+                    <TopMatchRow entry={entry} wide={wide} />
+                </UiEntity>
+            ))}
+            {totalPages > 1 && (
+                <TopMatchesFooter
+                    page={response.page}
+                    totalPages={totalPages}
+                    onPrev={() => {
+                        topMatchesPage = response.page - 1
+                        requestTopMatches(topMatchesSubtab, topMatchesPage)
+                    }}
+                    onNext={() => {
+                        topMatchesPage = response.page + 1
+                        requestTopMatches(topMatchesSubtab, topMatchesPage)
+                    }}
+                />
+            )}
+        </UiEntity>
+    )
+}
+
+/**
+ * PREV / page-of-total / NEXT - same visual pattern as ui.tsx's own Social
+ * Agenda pagination footer (PANEL_BACKGROUND-tinted tap targets, no
+ * wrap-around, disabled state just dims the label rather than hiding the
+ * button), reused here rather than inventing a new pagination look. `page`
+ * is 0-based internally; the visible counter is always 1-based.
+ */
+const TopMatchesFooter = ({ page, totalPages, onPrev, onNext }: { page: number; totalPages: number; onPrev: () => void; onNext: () => void }) => {
+    const canGoPrevious = page > 0
+    const canGoNext = page < totalPages - 1
+
+    return (
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', margin: { top: 14 } }}>
+            <UiEntity
+                uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 8 }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={() => {
+                    if (canGoPrevious) onPrev()
+                }}
+            >
+                <Label value="PREV" fontSize={14} color={canGoPrevious ? CREAM : MUTED} />
+            </UiEntity>
+            <Label value={`${page + 1} / ${totalPages}`} fontSize={14} color={MUTED} />
+            <UiEntity
+                uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 8 }}
+                uiBackground={{ color: PANEL_BACKGROUND }}
+                onMouseDown={() => {
+                    if (canGoNext) onNext()
+                }}
+            >
+                <Label value="NEXT" fontSize={14} color={canGoNext ? CREAM : MUTED} />
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * One ranked pair: rank (teal) + both display names (cream) joined by a
+ * small pink heart on the first line, affinity percentage (pink) at the far
+ * right; shared-answers count (muted) on a second, indented line underneath.
+ * `entry.displayNameA`/`displayNameB` and `entry.affinity`/
+ * `entry.sharedValidAnswers` all come straight from TopMatchRankedEntry
+ * (topMatchesRanking.ts) - no recomputation, no separate name-resolution
+ * system; `Math.round` here is presentation-only rounding of the already-
+ * derived percentage, the same rounding ui.tsx's own affinityLabel already
+ * applies to the identical value in Social Agenda, not a second formula.
+ * "♥" rather than a color emoji heart - a plain BMP dingbat glyph, the same
+ * class of Unicode symbol as the already-proven "✦" used elsewhere in this
+ * file, avoiding this SDK's inconsistent full-color-emoji glyph support.
+ */
+const TopMatchRow = ({ entry, wide }: { entry: TopMatchRankedEntry; wide: boolean }) => {
+    const sharedLabel = `${entry.sharedValidAnswers} SHARED ANSWER${entry.sharedValidAnswers === 1 ? '' : 'S'}`
+
+    return (
+        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', margin: { bottom: LEADERBOARD_ROW_GAP } }}>
+            <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Label value={`#${entry.rank}`} fontSize={wide ? 16 : 14} color={TEAL_ACCENT} />
+                    <UiEntity uiTransform={{ width: wide ? 10 : 8 }} />
+                    <Label value={entry.displayNameA} fontSize={wide ? 18 : 15} color={CREAM} />
+                    <UiEntity uiTransform={{ width: 6 }} />
+                    <Label value="♥" fontSize={wide ? 15 : 13} color={SOCIAL_PINK} />
+                    <UiEntity uiTransform={{ width: 6 }} />
+                    <Label value={entry.displayNameB} fontSize={wide ? 18 : 15} color={CREAM} />
+                </UiEntity>
+                <Label value={`${Math.round(entry.affinity)}%`} fontSize={wide ? 18 : 15} color={SOCIAL_PINK} />
+            </UiEntity>
+            <Label
+                value={sharedLabel}
+                fontSize={wide ? 13 : 11}
+                color={MUTED}
+                uiTransform={{ margin: { top: 4, left: wide ? 34 : 30 } }}
+            />
         </UiEntity>
     )
 }

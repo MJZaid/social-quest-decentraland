@@ -329,3 +329,23 @@ export function getTopMatchesThisWeek(limit: number): TopMatchesSnapshot {
     const ranked = buildRankedTopMatches(getTopMatchesWeeklyCacheSnapshot(), THIS_WEEK_MIN_SHARED_ANSWERS)
     return { status: 'ready', totalPairs: ranked.length, top: ranked.slice(0, clampTopN(limit)) }
 }
+
+/**
+ * One page of THIS WEEK's ranking starting at `offset` - pagination-safe
+ * counterpart to getTopMatchesThisWeek above, exactly mirroring
+ * topMatchesRanking.ts's own getTopMatches/getTopMatchesPage pairing (see
+ * that function's doc comment for the full reasoning: clampTopN's 100-pair
+ * cap is right for "top N" but wrong for real page navigation). Same single
+ * buildRankedTopMatches call, same THIS_WEEK_MIN_SHARED_ANSWERS threshold, no
+ * second ranking pass - only the slice bound changes (offset..offset+pageSize
+ * instead of 0..clampTopN(limit)), so every returned entry still carries its
+ * correct GLOBAL rank from the one sort already performed.
+ */
+export function getTopMatchesThisWeekPage(offset: number, pageSize: number): TopMatchesSnapshot {
+    if (!hydrationFullyLoaded) {
+        return { status: 'hydrating', totalPairs: 0, top: [] }
+    }
+
+    const ranked = buildRankedTopMatches(getTopMatchesWeeklyCacheSnapshot(), THIS_WEEK_MIN_SHARED_ANSWERS)
+    return { status: 'ready', totalPairs: ranked.length, top: ranked.slice(offset, offset + pageSize) }
+}
