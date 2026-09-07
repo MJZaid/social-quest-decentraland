@@ -1,6 +1,6 @@
 import ReactEcs, { Button, Label, ReactEcsRenderer, ScreenInsetArea, UiEntity } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
-import { engine, UiCanvasInformation } from '@dcl/sdk/ecs'
+import { engine, timers, UiCanvasInformation } from '@dcl/sdk/ecs'
 import { isMobile } from '@dcl/sdk/platform'
 import { roundManager, RevealData, RevealEntry } from './roundManager'
 import { playerSessionManager } from './playerSessionManager'
@@ -14,7 +14,7 @@ import {
     isNotificationsHydrated,
     requestMarkConnectionsSeen
 } from './socialNotificationsManager'
-import { getFriendshipLevel } from './friendshipManager'
+import { getFriendshipLevel, FRIENDSHIP_LEVELS } from './friendshipManager'
 import { getCompatibility, getSharedValidAnswers } from './compatibilityManager'
 import {
     getPresentedCelebration,
@@ -22,6 +22,16 @@ import {
     PresentedFriendshipCelebration
 } from './socialCelebrationQueue'
 import { LeaderboardButton, LeaderboardPanel, isLeaderboardOpen, closeLeaderboard } from './leaderboardUi'
+import { requestLeaderboard, getLatestLeaderboardResponse } from './leaderboardNetwork'
+import {
+    init as initSocialPointsFeedback,
+    markSocialPointsBaselineReady,
+    getActiveSocialPointsReward,
+    consumePendingCounterAmount,
+    triggerSocialPointsCounterPop,
+    getSocialPointsCounterPopScale,
+    ActiveSocialPointsReward
+} from './socialPointsFeedback'
 import { requestProfilePicture, getProfilePictureUrl } from './profilePictureManager'
 
 /** Virtual design resolution this scene's UI is authored against - kept in sync with the setUiRenderer call below. */
@@ -32,6 +42,70 @@ export function setupUi() {
     roundManager.start()
     playerSessionManager.start()
     ReactEcsRenderer.setUiRenderer(uiMenu, { virtualWidth: VIRTUAL_WIDTH, virtualHeight: VIRTUAL_HEIGHT })
+    requestSocialPointsBaseline()
+    initSocialPointsFeedback()
+}
+
+/**
+ * The HUD counter's own local total - sourced EXCLUSIVELY from
+ * leaderboardNetwork's existing `me.socialPoints` (itself
+ * getTotalSocialPoints(validRounds, friendshipBonusPoints), computed
+ * server-side - see persistenceSchema.ts/leaderboardRanking.ts). Never
+ * derived from Connections, never a second copy of that formula.
+ *
+ * `null` means "no reliable baseline yet this session" - the counter
+ * renders a placeholder (see SocialPointsCounter) rather than a possibly-
+ * wrong 0. Once set to a real number by requestSocialPointsBaseline() below,
+ * it is NEVER reseeded from a later leaderboardResponse (e.g. the player
+ * manually opening the Leaderboard panel later, which calls its own
+ * requestLeaderboard() and refreshes getLatestLeaderboardResponse()) - by
+ * design, per explicit instruction: this session's own optimistic reward
+ * increments (a later phase, not yet implemented) are meant to be the only
+ * thing that changes this number after the initial seed. A fresh baseline
+ * only ever comes from a new session's own call to this same function.
+ */
+let socialPointsCounter: number | null = null
+
+/** Bounded retry count/spacing for the initial baseline fetch - "a reasonable, non-infinite retry", not a persistent poll. 5 attempts x 1.5s = ~7.5s of trying before giving up for the rest of this session; if the player opens the Leaderboard panel manually after that, its own requestLeaderboard() call will still populate getLatestLeaderboardResponse(), but nothing automatically re-checks it afterward - see socialPointsCounter's own "never reseed" doc comment for why that's intentional, not an oversight. */
+const SOCIAL_POINTS_BASELINE_MAX_ATTEMPTS = 5
+const SOCIAL_POINTS_BASELINE_RETRY_INTERVAL_MS = 1500
+
+/**
+ * Requests the leaderboard once, purely to read `me.socialPoints` for the
+ * HUD counter's baseline - the Top N it also returns is unused here (see
+ * leaderboardNetwork.ts's own LeaderboardResponse shape; reusing this
+ * existing request/response avoids inventing a second, narrower message for
+ * the same data). Mirrors persistenceManager.ts's own tickPersistenceLoad
+ * pattern: request once, tolerate not being ready yet, never block anything
+ * else. `me === null` while `status === 'ready'` is a genuine, valid "0
+ * points, never yet reconciled onto the leaderboard mirror" case (see
+ * reconcileLeaderboardSnapshot's own doc comment in persistenceManager.ts) -
+ * NOT a sign to keep retrying, so it seeds 0 immediately, same as any other
+ * confirmed value.
+ */
+function requestSocialPointsBaseline(attemptsLeft: number = SOCIAL_POINTS_BASELINE_MAX_ATTEMPTS): void {
+    requestLeaderboard()
+    timers.setTimeout(() => {
+        if (socialPointsCounter !== null) return // already seeded (e.g. the player opened Leaderboard manually while this was waiting) - never reseed
+        const response = getLatestLeaderboardResponse()
+        if (response?.status === 'ready') {
+            socialPointsCounter = response.me?.socialPoints ?? 0
+            // Marks the baseline authoritative for everything that happened before
+            // this exact moment - see socialPointsFeedback.ts's own baselineReady doc
+            // comment for why a reward detected before this point must never be
+            // queued for counter application (it may already be reflected in the
+            // number just seeded above), while a reward detected AFTER this point
+            // always is.
+            markSocialPointsBaselineReady()
+            return
+        }
+        if (attemptsLeft > 1) {
+            requestSocialPointsBaseline(attemptsLeft - 1)
+        }
+        // else: exhausted the bounded retry budget - stays null/placeholder for the rest of
+        // this session unless the player happens to open Leaderboard themselves later (which
+        // does NOT automatically feed back into socialPointsCounter - see its own doc comment).
+    }, SOCIAL_POINTS_BASELINE_RETRY_INTERVAL_MS)
 }
 
 const COLUMN_CENTERED = {
@@ -142,7 +216,7 @@ const HUD_TOP_MARGIN = 10
 /** Extra vertical separation nudge between the CONNECTIONS pill above and the JOIN panel below it - JOIN only, per real-device feedback that they sat too close together. Every other phase's panel position is untouched. */
 const JOIN_EXTRA_TOP_MARGIN = 16
 
-/** Gap between the Agenda and Leaderboard buttons - the two form one fixed HUD group (see uiMenu), always this same distance apart, never repositioned relative to each other between phases. */
+/** Gap between Agenda/Leaderboard/the Social Points counter - the three form one fixed HUD group (see uiMenu), always this same distance apart, never repositioned relative to each other between phases. Reused as-is for the new counter's own gap to Leaderboard, rather than inventing a second gap value - "coherent" per explicit instruction. */
 const SOCIAL_HUD_GROUP_GAP = 8
 
 /**
@@ -168,14 +242,14 @@ const SOCIAL_HUD_GROUP_GAP = 8
  *   and UiTransformProps in this session's own typings audits), so every
  *   state is expressed purely through this size change, never a box.
  */
-const AGENDA_BUTTON_HIT_AREA_WIDE = 64
-const AGENDA_BUTTON_HIT_AREA_COMPACT = 56
-const AGENDA_BUTTON_ICON_SIZE_WIDE = 50
-const AGENDA_BUTTON_ICON_SIZE_HOVER_WIDE = 54
-const AGENDA_BUTTON_ICON_SIZE_PRESSED_WIDE = 46
-const AGENDA_BUTTON_ICON_SIZE_COMPACT = 44
-const AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT = 48
-const AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT = 40
+const AGENDA_BUTTON_HIT_AREA_WIDE = 72
+const AGENDA_BUTTON_HIT_AREA_COMPACT = 64
+const AGENDA_BUTTON_ICON_SIZE_WIDE = 60
+const AGENDA_BUTTON_ICON_SIZE_HOVER_WIDE = 64
+const AGENDA_BUTTON_ICON_SIZE_PRESSED_WIDE = 56
+const AGENDA_BUTTON_ICON_SIZE_COMPACT = 52
+const AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT = 56
+const AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT = 48
 const SOCIAL_AGENDA_ICON_PATH = 'assets/images/social-agenda-icon.png'
 
 /**
@@ -200,7 +274,7 @@ const SOCIAL_AGENDA_ICON_PATH = 'assets/images/social-agenda-icon.png'
  */
 const AGENDA_BADGE_SIZE_WIDE = 22
 const AGENDA_BADGE_SIZE_COMPACT = 19
-const AGENDA_BADGE_OFFSET_WIDE = -4
+const AGENDA_BADGE_OFFSET_WIDE = -5
 const AGENDA_BADGE_OFFSET_COMPACT = -3
 const AGENDA_BADGE_FONT_SIZE_WIDE = 13
 const AGENDA_BADGE_FONT_SIZE_COMPACT = 12
@@ -208,6 +282,81 @@ const AGENDA_BADGE_FONT_SIZE_COMPACT = 12
 const AGENDA_BADGE_BACKGROUND = Color4.create(0.95, 0.2, 0.5, 1)
 /** Above this, the badge shows "99+" rather than a growing 3+ digit number that could overflow its own small circle. */
 const AGENDA_BADGE_MAX_DISPLAY = 99
+
+/**
+ * Social Points counter - a real PNG asset (heart medallion + empty cream
+ * number zone), same uiBackground.texture + textureMode:'stretch' pattern as
+ * the Agenda/Leaderboard PNG icons. No background/border/box of its own -
+ * the image IS the design, per explicit instruction.
+ *
+ * The asset was replaced with a longer version - natively 2172x724 (3:1
+ * exactly, confirmed by reading the file itself, never assumed). WIDTH is
+ * now always DERIVED from HEIGHT via SOCIAL_POINTS_COUNTER_ASPECT_RATIO,
+ * restoring true aspect-ratio-correct rendering - the earlier manually-
+ * widened, ratio-breaking WIDTH_WIDE/WIDTH_COMPACT constants (an accepted
+ * stretch trade-off for the OLD 2:1 asset, to fit "999K SP"/"1.5M SP") are
+ * gone; the new asset's own extra width already gives text room natively,
+ * with no artificial stretch needed. Heights are unchanged from before
+ * (same vertical weight next to Agenda/Leaderboard as already established).
+ *
+ * INITIAL estimate, explicitly not final: the heart medallion is assumed to
+ * occupy the left portion of the (now wider) image, the empty cream number
+ * zone the remaining right portion (see SOCIAL_POINTS_COUNTER_TEXT_ZONE_WIDTH_PERCENT
+ * below, left unchanged from the previous asset pending the user's own visual
+ * check with the new one). The text overlay is centered inside that right
+ * portion only, never the full width - see SocialPointsCounter's own render.
+ */
+const SOCIAL_POINTS_COUNTER_ICON_PATH = 'assets/images/social-points-counter.png'
+const SOCIAL_POINTS_COUNTER_ASPECT_RATIO = 2172 / 724
+const SOCIAL_POINTS_COUNTER_HEIGHT_WIDE = 68
+const SOCIAL_POINTS_COUNTER_HEIGHT_COMPACT = 58
+/** Width of the absolute text overlay, anchored to the counter's own right edge (the cream zone) - see SocialPointsCounter's own doc comment for why this is an absolute overlay rather than a flex split. Left at the same 72% used for the previous asset - a starting estimate, pending the user's own visual check against the new, wider image. */
+const SOCIAL_POINTS_COUNTER_TEXT_ZONE_WIDTH_PERCENT = '72%'
+/** Number itself - strong/saturated pink, same AGENDA_BADGE_BACKGROUND color already established for the Connections notification badge, reused here for "Social Quest magenta" rather than inventing a second pink. */
+const SOCIAL_POINTS_COUNTER_NUMBER_COLOR = AGENDA_BADGE_BACKGROUND
+/** "SP" suffix - teal, same AGENDA_TEAL already used throughout Social Agenda/HUD, per explicit "teal if viable" preference. */
+const SOCIAL_POINTS_COUNTER_SUFFIX_COLOR = AGENDA_TEAL
+const SOCIAL_POINTS_COUNTER_NUMBER_FONT_SIZE_WIDE = 24
+const SOCIAL_POINTS_COUNTER_NUMBER_FONT_SIZE_COMPACT = 19
+const SOCIAL_POINTS_COUNTER_SUFFIX_FONT_SIZE_WIDE = 16
+const SOCIAL_POINTS_COUNTER_SUFFIX_FONT_SIZE_COMPACT = 13
+/** Shown in place of the number while socialPointsCounter is still null (see its own doc comment) - never a possibly-wrong 0. */
+const SOCIAL_POINTS_COUNTER_PLACEHOLDER = '--'
+
+/**
+ * Abbreviates a Social Points total for the HUD counter ONLY - display
+ * formatting, never the real value. `socialPointsCounter` itself (the
+ * number this reads) is untouched by this function; the Leaderboard panel
+ * keeps showing the exact full number wherever it already does (leaderboardUi.tsx
+ * is not touched by this at all), and future reward toasts are expected to
+ * show exact amounts too ("+25 SP"), never abbreviated - this helper is
+ * HUD-counter-specific by design, not a shared formatter.
+ *
+ * Rule: below 1000, the exact integer ("435", "999"). At/above 1000,
+ * TRUNCATED (never rounded) to one decimal digit plus K/M/B - truncation
+ * specifically so e.g. 9999 reads as "9.9K", never "10K" before the player
+ * has actually reached 10,000 (rounding would misrepresent a total the
+ * player hasn't earned yet; truncating never overstates it). A whole
+ * multiple (1000, 10000, 125000) drops the decimal entirely ("1K", "10K",
+ * "125K") rather than showing "1.0K".
+ */
+function formatSocialPointsForHud(value: number): string {
+    if (value < 1000) return `${value}`
+
+    const units: Array<[threshold: number, suffix: string]> = [
+        [1_000_000_000, 'B'],
+        [1_000_000, 'M'],
+        [1_000, 'K']
+    ]
+    for (const [threshold, suffix] of units) {
+        if (value >= threshold) {
+            const truncatedTenths = Math.floor((value * 10) / threshold)
+            const scaled = truncatedTenths / 10
+            return `${scaled}${suffix}`
+        }
+    }
+    return `${value}` // unreachable (value >= 1000 always matches the last unit above) - kept as a safe fallback, never throws
+}
 
 /** Horizontal gap between the HUD and the celebration toast when shown side by side in WIDE. */
 const WIDE_ROW_GAP = 24
@@ -449,6 +598,21 @@ const ANSWERING_QUESTION_FONT_SIZE_WIDE = 32
 const ANSWERING_QUESTION_FONT_SIZE_COMPACT = 24
 const ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE = 28
 const ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT = 14
+/**
+ * Reserved, fixed height for the question itself - same root cause and same
+ * proven fix as ResultColumn's option title / the earlier name-overlap bug
+ * (see REVEAL_TITLE_AREA_HEIGHT_*'s own doc comment): a wrap-enabled Label's
+ * rendered height isn't reliably fed back into this SDK's flex layout, so a
+ * bare wrapped question let its second line visually creep into the timer
+ * sitting right below it. Sized generously for 2 lines at the question's own
+ * font size (same ~1.3x-line-height ratio already used for REVEAL_TITLE_AREA_
+ * HEIGHT_*), so the timer's position is fixed regardless of whether the
+ * question renders as 1 or 2 lines - a real reserved zone, not a guess. The
+ * question Label is vertically centered inside this box, so a short 1-line
+ * question still reads centered rather than pinned to the top.
+ */
+const ANSWERING_QUESTION_AREA_HEIGHT_WIDE = 88
+const ANSWERING_QUESTION_AREA_HEIGHT_COMPACT = 66
 const ANSWERING_TIMER_FONT_SIZE_WIDE = 24
 const ANSWERING_TIMER_FONT_SIZE_COMPACT = 16
 const ANSWERING_TIMER_MARGIN_BOTTOM_WIDE = 28
@@ -595,6 +759,23 @@ export const uiMenu = () => {
         revealUnseenConnections(drainPendingReveal())
     }
 
+    // Applies any Social Points rewards detected since the last frame to the HUD
+    // counter - ONLY once a real baseline exists (socialPointsCounter !== null).
+    // While it's still null, consumePendingCounterAmount() is deliberately never
+    // called, so amounts stay safely accumulated inside socialPointsFeedback.ts
+    // itself (see its own doc comment) - the moment the baseline lands, this same
+    // check (now true) drains everything accumulated so far in one shot, applying
+    // it exactly once. Unconditional on Agenda/Leaderboard open state - the
+    // counter is always visible in the HUD.
+    if (socialPointsCounter !== null) {
+        const pendingSocialPointsAmount = consumePendingCounterAmount()
+        if (pendingSocialPointsAmount !== 0) {
+            socialPointsCounter += pendingSocialPointsAmount
+            triggerSocialPointsCounterPop()
+        }
+    }
+    const activeSocialPointsReward = getActiveSocialPointsReward()
+
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
         <ScreenInsetArea>
@@ -624,19 +805,33 @@ export const uiMenu = () => {
                 }}
             >
                 <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                    {/* Fixed HUD group [ AGENDA ][ LEADERBOARD ], always visible on every
-                        platform and in every phase (including ANSWERING/ANSWER LOCKED) - same
-                        fixed position and same two elements throughout, never hidden, reordered,
-                        or moved. Connections' own count is no longer duplicated here as a
-                        separate indicator - Social Agenda is the one place that shows it
-                        ("N CONNECTIONS", see its own header) - so this group is now purely the
-                        two action buttons. SocialAgendaButton's tap is disabled (no-op) during
-                        ANSWERING/ANSWER LOCKED - see its own doc comment - so the player can
-                        never cover the question or lose response time. */}
+                    {/* Fixed HUD group [ AGENDA ][ LEADERBOARD ][ SP COUNTER ], always visible
+                        on every platform and in every phase (including ANSWERING/ANSWER
+                        LOCKED) - same fixed position and same three elements throughout, never
+                        hidden, reordered, or moved. Connections' own count is no longer
+                        duplicated here as a separate indicator - Social Agenda is the one place
+                        that shows it ("N CONNECTIONS", see its own header). SocialAgendaButton's
+                        tap is disabled (no-op) during ANSWERING/ANSWER LOCKED - see its own doc
+                        comment - so the player can never cover the question or lose response
+                        time. SocialPointsCounter has no tap handler at all, same reasoning as
+                        the retired Connections pill. */}
                     <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
                         <SocialAgendaButton wide={wide} />
                         <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <LeaderboardButton wide={wide} onOpen={() => { socialAgendaOpen = false }} />
+                        <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
+                        <SocialPointsCounter wide={wide} />
+                        {/* Absolutely positioned within THIS row - flush to its bottom-right
+                            corner, roughly under the counter - so it never affects the row's
+                            own flex layout (Agenda/Leaderboard/Counter never shift because of
+                            it). Always VALID_ROUND now - socialPointsFeedback.ts's own
+                            presentationQueue never queues a FRIENDSHIP_BONUS reward anymore
+                            (that bonus shows inline inside NewConnectionToast/FriendshipToast
+                            instead - see their own doc comments), so getActiveSocialPointsReward()
+                            can only ever return one of those here. First-pass placement only,
+                            per explicit instruction to validate timing/queue/counter-increment/
+                            animation before any visual polish. */}
+                        {activeSocialPointsReward && <SocialPointsValidRoundToast data={activeSocialPointsReward} wide={wide} />}
                     </UiEntity>
                 </UiEntity>
                 {/* Compact toast presentation for the right slot on every platform - the large
@@ -839,14 +1034,28 @@ const JoinedGameplay = () => {
 
     return (
         <UiEntity uiTransform={COLUMN_CENTERED}>
-            <Label
-                value={activeQuestion.question}
-                fontSize={compact ? ANSWERING_QUESTION_FONT_SIZE_COMPACT : ANSWERING_QUESTION_FONT_SIZE_WIDE}
-                textAlign="middle-center"
-                textWrap="wrap"
-                color={Color4.White()}
-                uiTransform={{ width: '100%', margin: { bottom: compact ? ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT : ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE } }}
-            />
+            {/* Fixed-height reserved zone for the question - see ANSWERING_QUESTION_AREA_HEIGHT_*'s
+                own doc comment. Its bottom edge (and therefore the timer's position right below it)
+                never moves, whether the question renders as 1 or 2 lines. */}
+            <UiEntity
+                uiTransform={{
+                    width: '100%',
+                    height: compact ? ANSWERING_QUESTION_AREA_HEIGHT_COMPACT : ANSWERING_QUESTION_AREA_HEIGHT_WIDE,
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    margin: { bottom: compact ? ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT : ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE }
+                }}
+            >
+                <Label
+                    value={activeQuestion.question}
+                    fontSize={compact ? ANSWERING_QUESTION_FONT_SIZE_COMPACT : ANSWERING_QUESTION_FONT_SIZE_WIDE}
+                    textAlign="middle-center"
+                    textWrap="wrap"
+                    color={Color4.White()}
+                    uiTransform={{ width: '100%' }}
+                />
+            </UiEntity>
 
             {phase === 'answering' ? (
                 <UiEntity uiTransform={COLUMN_CENTERED}>
@@ -1100,6 +1309,220 @@ const ResultColumn = ({
 }
 
 /**
+ * Third element of the fixed HUD group, alongside SocialAgendaButton/
+ * LeaderboardButton (see uiMenu) - purely informational, no tap handler at
+ * all (mirrors the retired Connections pill's own "information only, no
+ * action" role, not a coincidence - same reasoning: a number should never
+ * double as a button). Renders the social-points-counter.png medallion at
+ * its own aspect-ratio-correct size, with the current total (or a
+ * placeholder - see socialPointsCounter's own doc comment) drawn as an
+ * absolute overlay anchored to the cream zone (right side) - never a full-
+ * width layout, since the left side is the heart medallion baked into the
+ * image itself. See the overlay's own doc comment for why it's an absolute
+ * overlay rather than a flex sibling splitting the counter's own width.
+ */
+const SocialPointsCounter = ({ wide }: { wide: boolean }) => {
+    const baseHeight = wide ? SOCIAL_POINTS_COUNTER_HEIGHT_WIDE : SOCIAL_POINTS_COUNTER_HEIGHT_COMPACT
+    const baseWidth = baseHeight * SOCIAL_POINTS_COUNTER_ASPECT_RATIO
+    const numberFontSize = wide ? SOCIAL_POINTS_COUNTER_NUMBER_FONT_SIZE_WIDE : SOCIAL_POINTS_COUNTER_NUMBER_FONT_SIZE_COMPACT
+    const suffixFontSize = wide ? SOCIAL_POINTS_COUNTER_SUFFIX_FONT_SIZE_WIDE : SOCIAL_POINTS_COUNTER_SUFFIX_FONT_SIZE_COMPACT
+    // formatSocialPointsForHud abbreviates for DISPLAY only - socialPointsCounter itself
+    // (the real local total) is never modified here or anywhere else by this formatting.
+    const numberText = socialPointsCounter === null ? SOCIAL_POINTS_COUNTER_PLACEHOLDER : formatSocialPointsForHud(socialPointsCounter)
+    // Popped size, applied to width AND height together so the aspect ratio is
+    // never deformed (see getSocialPointsCounterPopScale's own doc comment). The
+    // OUTER UiEntity below stays fixed at the base size so this pop never shifts
+    // Agenda/Leaderboard's own flex layout - only the inner, visual entity grows/
+    // shrinks, centered within that fixed outer footprint.
+    const popScale = getSocialPointsCounterPopScale()
+    const poppedHeight = baseHeight * popScale
+    const poppedWidth = baseWidth * popScale
+
+    return (
+        <UiEntity uiTransform={{ width: baseWidth, height: baseHeight, justifyContent: 'center', alignItems: 'center' }}>
+        <UiEntity
+            uiTransform={{ width: poppedWidth, height: poppedHeight }}
+            uiBackground={{ texture: { src: SOCIAL_POINTS_COUNTER_ICON_PATH }, textureMode: 'stretch' }}
+        >
+            {/* Text area is an ABSOLUTE overlay anchored to the cream zone (right side),
+                NOT a flex sibling splitting the counter's own width - an earlier 50/50
+                flex split left too little room for "435 SP" at this font size and caused
+                per-character wrapping (Yoga's default textWrap:'wrap', confirmed in
+                @dcl/react-ecs's own typings). An absolute overlay is free to be as wide as
+                needed while still anchored to the right edge via `position:{right:0}`, so
+                it still reads as "over the cream zone" without being clipped to a strict
+                fraction. `textWrap:'nowrap'` on both Labels (explicit, not the default)
+                plus `flexShrink:0` is what actually stops wrapping - confirmed real props.
+                Values are abbreviated (formatSocialPointsForHud) specifically so this
+                overlay never needs to hold more than ~4-5 characters ("999K", "1.5M") no
+                matter how large the real total grows - see that function's own doc
+                comment. Width/offset here are still a first pass pending the user's own
+                visual check. */}
+            <UiEntity
+                uiTransform={{
+                    positionType: 'absolute',
+                    position: { right: 0, top: 0 },
+                    width: SOCIAL_POINTS_COUNTER_TEXT_ZONE_WIDTH_PERCENT,
+                    height: '100%',
+                    flexDirection: 'row',
+                    justifyContent: 'center',
+                    alignItems: 'center'
+                }}
+            >
+                <Label
+                    value={numberText}
+                    fontSize={numberFontSize}
+                    color={socialPointsCounter === null ? MUTED : SOCIAL_POINTS_COUNTER_NUMBER_COLOR}
+                    textWrap="nowrap"
+                    uiTransform={{ flexShrink: 0 }}
+                />
+                <Label
+                    value=" SP"
+                    fontSize={suffixFontSize}
+                    color={socialPointsCounter === null ? MUTED : SOCIAL_POINTS_COUNTER_SUFFIX_COLOR}
+                    textWrap="nowrap"
+                    uiTransform={{ flexShrink: 0 }}
+                />
+            </UiEntity>
+        </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
+ * VALID_ROUND-only micro toast: a real PNG heart (assets/images/social-points-valid-heart.png,
+ * confirmed 1254x1254 - a real 1:1 square, RGBA with alpha), with ONLY "+1"
+ * text INSIDE it (generated by code, no baked-in text) - no "SP" here
+ * anymore, since the main counter already carries that suffix and repeating
+ * it inside a small, frequent micro toast added noise without adding
+ * information. No uiBackground/border/capsule of its own - "contenedor
+ * transparente" per explicit instruction. "+1" uses AGENDA_CREAM (warm
+ * off-white) rather than the usual strong pink, specifically for legibility
+ * against the heart's own reddish/pink artwork - a deliberate contrast
+ * call, still within the established cream/pink/teal Social Quest palette,
+ * not a new color; tried first per explicit priority order, kept because it
+ * already reads clearly.
+ *
+ * Slightly bigger than the previous pass, specifically to give the single
+ * "+1" real breathing room now that it's alone inside the heart (no longer
+ * sharing space with "SP"). A small vertical nudge
+ * (SOCIAL_POINTS_VALID_ROUND_TEXT_OPTICAL_OFFSET_Y) shifts the text up from
+ * the heart's exact mathematical center - hearts carry most of their visual
+ * "mass" in the two upper lobes before tapering to a bottom point, so a
+ * perfectly centered number tends to read as sitting slightly too low/close
+ * to the point. First-pass value, pending the user's own visual check.
+ */
+const SOCIAL_POINTS_VALID_ROUND_HEART_ICON_PATH = 'assets/images/social-points-valid-heart.png'
+const SOCIAL_POINTS_VALID_ROUND_HEART_SIZE_WIDE = 64
+const SOCIAL_POINTS_VALID_ROUND_HEART_SIZE_COMPACT = 52
+const SOCIAL_POINTS_VALID_ROUND_AMOUNT_FONT_SIZE_WIDE = 26
+const SOCIAL_POINTS_VALID_ROUND_AMOUNT_FONT_SIZE_COMPACT = 21
+/** Upward nudge (px, at 1x/full scale) for optical centering - see this block's own doc comment. Scaled by the same overallScale as everything else so it shrinks proportionally during the travel animation. */
+const SOCIAL_POINTS_VALID_ROUND_TEXT_OPTICAL_OFFSET_Y_WIDE = -3
+const SOCIAL_POINTS_VALID_ROUND_TEXT_OPTICAL_OFFSET_Y_COMPACT = -2
+
+/**
+ * "Travel toward the counter" animation constants, VALID_ROUND only -
+ * everything after the shared POP phase (which stays as-is, driven by the
+ * generic phase/phaseProgress) is reinterpreted here as one continuous
+ * travel: the heart drifts from its starting spot up toward the HUD row
+ * (where SocialPointsCounter sits, same row/right-alignment - see
+ * SocialPointsValidRoundToast's own doc comment for why this is "close
+ * enough" without needing the counter's exact on-screen coordinates),
+ * shrinking and fading as it goes - "this +1 is being absorbed into the
+ * counter". A plain linear interpolation, no easing curves, per explicit
+ * "no hace falta animación compleja" instruction.
+ */
+const SOCIAL_POINTS_VALID_ROUND_POP_SECONDS = 0.15 // mirrors socialPointsFeedback.ts's own POP_PHASE_SECONDS - duplicated small constant, same "sibling files, no tight coupling" convention already used elsewhere in this file (e.g. AGENDA_PINK in leaderboardUi.tsx)
+const SOCIAL_POINTS_VALID_ROUND_FADE_START_FRACTION = 0.4 // opacity stays 1 for the first 40% of the travel, then fades linearly over the remaining 60%
+const SOCIAL_POINTS_VALID_ROUND_TRAVEL_END_SCALE = 0.55 // size at the very end of the travel, relative to its popped size - shrinks as it "arrives"
+
+/**
+ * VALID_ROUND micro toast - a single real PNG heart with only "+1" INSIDE it
+ * (absolute overlay, centered), no text beside it, no "SP" (the main
+ * counter already carries that suffix - repeating it here was just noise
+ * for a small, frequent reward), and no
+ * uiBackground/border/capsule around it. Two animation stages, both linear
+ * interpolations, no easing curves:
+ *
+ * 1. POP (phase === 'pop', shared timing with every other reward toast) -
+ *    grows in place from 70% to 100% size, exactly as before.
+ * 2. TRAVEL (everything after POP - spans what used to be the separate
+ *    'hold'/'exit' phases, unified here into one continuous motion) - drifts
+ *    from its starting position up toward the HUD row (same right-aligned
+ *    column SocialPointsCounter sits in - see SOCIAL_POINTS_VALID_ROUND_*
+ *    travel constants' own doc comment for why "the row's top edge" is used
+ *    as the target rather than the counter's exact internal text position),
+ *    shrinking to SOCIAL_POINTS_VALID_ROUND_TRAVEL_END_SCALE and fading out
+ *    over the back 60% of that same travel - "this +1 is being absorbed
+ *    into the counter".
+ *
+ * elapsedSeconds/totalDurationSeconds (not phase/phaseProgress) drive the
+ * travel math, since it spans more than one of the generic phases -
+ * SOCIAL_POINTS_VALID_ROUND_POP_SECONDS is this file's own local mirror of
+ * socialPointsFeedback.ts's private POP_PHASE_SECONDS, needed only to know
+ * where POP ends and TRAVEL begins.
+ */
+const SocialPointsValidRoundToast = ({ data, wide }: { data: ActiveSocialPointsReward; wide: boolean }) => {
+    const { reward, phase, phaseProgress, elapsedSeconds, totalDurationSeconds } = data
+    const anchorTop = (wide ? AGENDA_BUTTON_HIT_AREA_WIDE : AGENDA_BUTTON_HIT_AREA_COMPACT) + SOCIAL_HUD_GROUP_GAP
+
+    const isPopping = phase === 'pop'
+    const popScale = isPopping ? 0.7 + 0.3 * phaseProgress : 1
+
+    const travelDuration = totalDurationSeconds - SOCIAL_POINTS_VALID_ROUND_POP_SECONDS
+    const travelProgress = isPopping
+        ? 0
+        : Math.min(1, Math.max(0, (elapsedSeconds - SOCIAL_POINTS_VALID_ROUND_POP_SECONDS) / (travelDuration > 0 ? travelDuration : 1)))
+
+    const opacity =
+        travelProgress < SOCIAL_POINTS_VALID_ROUND_FADE_START_FRACTION
+            ? 1
+            : 1 - (travelProgress - SOCIAL_POINTS_VALID_ROUND_FADE_START_FRACTION) / (1 - SOCIAL_POINTS_VALID_ROUND_FADE_START_FRACTION)
+    const travelScale = 1 - (1 - SOCIAL_POINTS_VALID_ROUND_TRAVEL_END_SCALE) * travelProgress
+    const overallScale = popScale * travelScale
+    // Linearly interpolates from anchorTop (starting spot, below the HUD row) to 0
+    // (the row's own top edge, where the counter sits) as travelProgress goes 0->1.
+    const currentTop = anchorTop * (1 - travelProgress)
+
+    const heartSize = (wide ? SOCIAL_POINTS_VALID_ROUND_HEART_SIZE_WIDE : SOCIAL_POINTS_VALID_ROUND_HEART_SIZE_COMPACT) * overallScale
+    const amountFontSize = (wide ? SOCIAL_POINTS_VALID_ROUND_AMOUNT_FONT_SIZE_WIDE : SOCIAL_POINTS_VALID_ROUND_AMOUNT_FONT_SIZE_COMPACT) * overallScale
+    const opticalOffsetY = (wide ? SOCIAL_POINTS_VALID_ROUND_TEXT_OPTICAL_OFFSET_Y_WIDE : SOCIAL_POINTS_VALID_ROUND_TEXT_OPTICAL_OFFSET_Y_COMPACT) * overallScale
+
+    return (
+        <UiEntity
+            uiTransform={{
+                positionType: 'absolute',
+                position: { top: currentTop, right: 0 },
+                pointerFilter: 'none' // purely informational, must never intercept clicks meant for the HUD buttons beneath/around it
+            }}
+        >
+            <UiEntity
+                uiTransform={{ width: heartSize, height: heartSize }}
+                uiBackground={{
+                    texture: { src: SOCIAL_POINTS_VALID_ROUND_HEART_ICON_PATH },
+                    textureMode: 'stretch',
+                    color: Color4.create(1, 1, 1, opacity)
+                }}
+            >
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { top: opticalOffsetY },
+                        width: '100%',
+                        height: '100%',
+                        justifyContent: 'center',
+                        alignItems: 'center'
+                    }}
+                >
+                    <Label value={`+${reward.amount}`} fontSize={amountFontSize} color={Color4.create(AGENDA_CREAM.r, AGENDA_CREAM.g, AGENDA_CREAM.b, opacity)} textWrap="nowrap" />
+                </UiEntity>
+            </UiEntity>
+        </UiEntity>
+    )
+}
+
+/**
  * Opens the Social Agenda overlay - one of the two buttons in the fixed HUD
  * group (see uiMenu). Its icon is the final Social Agenda PNG asset (see
  * AGENDA_BUTTON_* constants' doc comment) - the earlier provisional
@@ -1341,10 +1764,9 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             row below (a currently-observable name wins over the persisted one,
                             which wins over the generic fallback) - no extra profile requests, just
                             the data this panel already has. Names beyond MAX_CELEBRATION_NAMES
-                            collapse into "+N more", reusing that same constant/pattern already
-                            established for the HUD toasts (joinNamesForToast) - own join here since
-                            the exact copy format ("Name1, Name2 +1 more") differs from that one's
-                            (" + " / "+N"). Visual treatment deliberately simple/placeholder - a
+                            collapse into "+N more" (own join here - the HUD toasts above no longer
+                            list multiple names at all, so there's nothing shared to reuse). Visual
+                            treatment deliberately simple/placeholder - a
                             bordered box in the panel's own existing palette, not yet the
                             nine-slice/sticker polish planned for a later pass. */}
                         {agendaRevealedConnectionIds.length > 0 &&
@@ -1558,55 +1980,104 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
     )
 }
 
-/** Joins up to MAX_CELEBRATION_NAMES names with " + ", collapsing the rest into "+N" - shared by both compact toasts. */
-function joinNamesForToast(names: string[]): string {
-    const shown = names.slice(0, MAX_CELEBRATION_NAMES)
-    const remaining = names.length - shown.length
-    const joined = shown.join(' + ')
-    return remaining > 0 ? `${joined} +${remaining}` : joined
+/**
+ * NEW_CONNECTION's own Social Points bonus, resolved from FRIENDSHIP_LEVELS
+ * by its stable id (never a hardcoded 25) and multiplied by how many new
+ * partners this celebration actually covers - each one individually crosses
+ * the NEW_CONNECTION milestone (see friendshipManager.ts's own "first
+ * observation" rule), so N simultaneous new Connections means N times the
+ * bonus, matching exactly what socialPointsFeedback.ts's counter already
+ * adds (one queueReward() call per crossing - see tickFriendshipBonus). This
+ * NEW_CONNECTION milestone never emits a FriendshipLevelUpEvent of its own
+ * (by design - see friendshipManager.ts), so a real PresentedNewConnectionCelebration
+ * firing at all IS the signal, rather than a field on the event itself.
+ */
+function resolveNewConnectionBonusAmount(newConnectionCount: number): number {
+    const definition = FRIENDSHIP_LEVELS.find((level) => level.id === 'NEW_CONNECTION')
+    return (definition?.bonusPoints ?? 0) * newConnectionCount
 }
 
 /**
  * Single-line toast for a NEW CONNECTION, shown in the right slot of the upper
- * social row (see uiMenu) - the sole NEW CONNECTION presentation now, in WIDE,
- * normal COMPACT, and (alone, replacing Connections) very-small. Never stacks a
- * tall card under or beside the HUD and can never grow the distance to the
- * gameplay panel below. Purely a renderer of the data it's given; builds no
- * relationship/queue logic of its own.
+ * social row (see uiMenu). TITLE / name (singular only) / BONUS SP hierarchy:
+ * exactly 1 new partner names them (the detail Social Agenda already covers
+ * in full), 2+ collapses straight to a count - never lists multiple names, so
+ * the toast can't grow long or wide with a big group. Purely a renderer of
+ * the data it's given; builds no relationship/queue logic of its own.
  */
 const NewConnectionToast = ({ data }: { data: PresentedNewConnectionCelebration }) => {
-    let unresolvedCount = 0
-    const names = data.newUserIds.map((userId) => getDisplayNameFor(userId) ?? `${QUESTMATE_FALLBACK} ${++unresolvedCount}`)
-    // Grouped-count meaning preserved from the retired large card: "NEW CONNECTION" for one
-    // partner, "N NEW CONNECTIONS" when several are grouped into the same celebration.
-    const headerText = names.length === 1 ? 'NEW CONNECTION' : `${names.length} NEW CONNECTIONS`
-    const text = `✦ ${headerText} · ${joinNamesForToast(names)}`
+    const count = data.newUserIds.length
+    const titleText = count === 1 ? 'NEW CONNECTION!' : `${count} NEW CONNECTIONS!`
+    const nameText = count === 1 ? getDisplayNameFor(data.newUserIds[0]) ?? QUESTMATE_FALLBACK : null
+    const bonusAmount = resolveNewConnectionBonusAmount(count)
 
     return (
         <UiEntity
-            uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+            uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
             uiBackground={{ color: Color4.create(0.35, 0.08, 0.25, 0.92) }}
         >
-            <Label value={text} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="wrap" />
+            <Label value={titleText} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
+            {nameText !== null && (
+                <Label
+                    value={nameText}
+                    fontSize={14}
+                    color={MUTED}
+                    textAlign="middle-center"
+                    textWrap="nowrap"
+                    uiTransform={{ margin: { top: 2 } }}
+                />
+            )}
+            <Label value={`+${bonusAmount} SP`} fontSize={15} color={AGENDA_TEAL} textAlign="middle-center" uiTransform={{ margin: { top: 4 } }} />
         </UiEntity>
     )
 }
 
-/** Single-line toast for a FRIENDSHIP LEVEL UP - the sole Friendship presentation now, same as NewConnectionToast (see its doc comment). */
+/**
+ * Single-line toast for a FRIENDSHIP LEVEL UP. Same TITLE / name-or-summary /
+ * BONUS SP hierarchy as NewConnectionToast above: exactly 1 partner at this
+ * level names them, 2+ AT THE SAME level collapses to a short count summary -
+ * never lists multiple names. The bonus is resolved from FRIENDSHIP_LEVELS by
+ * `data.level` (never a hardcoded number) and multiplied by how many partners
+ * reached that SAME level this tick, matching exactly what
+ * socialPointsFeedback.ts's counter already added (one queueReward() call per
+ * crossing).
+ *
+ * `data.level` is `null` when several partners crossed DIFFERENT levels in
+ * the same tick (see friendshipCelebration.ts's own buildSnapshot doc
+ * comment) - there is no single resolvable level, name, or bonus amount in
+ * that case (each partner earned something different), so this keeps the
+ * existing generic "LEVEL UP" title only, with no name and no SP line rather
+ * than inventing any of the three. A known, accepted limitation of the
+ * current celebration payload, not solved in this pass.
+ */
 const FriendshipToast = ({ data }: { data: PresentedFriendshipCelebration }) => {
-    let unresolvedCount = 0
-    const names = data.userIds.map((userId) => getDisplayNameFor(userId) ?? `${QUESTMATE_FALLBACK} ${++unresolvedCount}`)
-    const levelText = data.level ?? 'LEVEL UP'
-    const roundsText =
-        data.level !== null && data.roundsTogether !== null ? ` · ${data.roundsTogether} ROUND${data.roundsTogether === 1 ? '' : 'S'}` : ''
-    const text = `✦ ${levelText} · ${joinNamesForToast(names)}${roundsText}`
+    if (data.level === null) {
+        return (
+            <UiEntity
+                uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+                uiBackground={{ color: Color4.create(0.08, 0.2, 0.35, 0.92) }}
+            >
+                <Label value="LEVEL UP!" fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
+            </UiEntity>
+        )
+    }
+
+    const count = data.userIds.length
+    const titleText = `${data.level}!`
+    const nameText = count === 1 ? getDisplayNameFor(data.userIds[0]) ?? QUESTMATE_FALLBACK : `${count} CONNECTIONS LEVELED UP`
+    const levelDefinition = FRIENDSHIP_LEVELS.find((level) => level.level === data.level)
+    const bonusAmount = levelDefinition ? levelDefinition.bonusPoints * count : null
 
     return (
         <UiEntity
-            uiTransform={{ flexDirection: 'row', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
+            uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
             uiBackground={{ color: Color4.create(0.08, 0.2, 0.35, 0.92) }}
         >
-            <Label value={text} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="wrap" />
+            <Label value={titleText} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
+            <Label value={nameText} fontSize={14} color={MUTED} textAlign="middle-center" textWrap="nowrap" uiTransform={{ margin: { top: 2 } }} />
+            {bonusAmount !== null && (
+                <Label value={`+${bonusAmount} SP`} fontSize={15} color={AGENDA_TEAL} textAlign="middle-center" uiTransform={{ margin: { top: 4 } }} />
+            )}
         </UiEntity>
     )
 }
