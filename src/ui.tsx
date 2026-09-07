@@ -14,13 +14,16 @@ import {
     isNotificationsHydrated,
     requestMarkConnectionsSeen
 } from './socialNotificationsManager'
-import { getFriendshipLevel, FRIENDSHIP_LEVELS } from './friendshipManager'
+import { getFriendshipLevel, FRIENDSHIP_LEVELS, FriendshipMilestoneId } from './friendshipManager'
 import { getCompatibility, getSharedValidAnswers } from './compatibilityManager'
 import {
     getPresentedCelebration,
+    PresentedSocialCelebration,
     PresentedNewConnectionCelebration,
     PresentedFriendshipCelebration
 } from './socialCelebrationQueue'
+import { CELEBRATION_TICKS as NEW_CONNECTION_CELEBRATION_TICKS } from './connectionCelebration'
+import { CELEBRATION_TICKS as FRIENDSHIP_CELEBRATION_TICKS } from './friendshipCelebration'
 import { LeaderboardButton, LeaderboardPanel, isLeaderboardOpen, closeLeaderboard } from './leaderboardUi'
 import { requestLeaderboard, getLatestLeaderboardResponse } from './leaderboardNetwork'
 import {
@@ -44,6 +47,12 @@ export function setupUi() {
     ReactEcsRenderer.setUiRenderer(uiMenu, { virtualWidth: VIRTUAL_WIDTH, virtualHeight: VIRTUAL_HEIGHT })
     requestSocialPointsBaseline()
     initSocialPointsFeedback()
+    // Own independent pop/hold/exit accumulator for celebration cards - same
+    // architecture as socialPointsFeedback.ts's engine.addSystem for
+    // SocialPointsValidRoundToast, kept entirely in this file (see
+    // tickCelebrationPresentation's own doc comment). Never touches
+    // socialCelebrationQueue.ts/connectionCelebration.ts/friendshipCelebration.ts.
+    engine.addSystem(tickCelebrationPresentation)
 }
 
 /**
@@ -841,12 +850,20 @@ export const uiMenu = () => {
                 <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
                     {presentedNewConnection && (
                         <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
-                            <NewConnectionToast data={presentedNewConnection} />
+                            <NewConnectionToast
+                                data={presentedNewConnection}
+                                presentation={getActiveCelebrationPresentation(presentedNewConnection)}
+                                wide={wide}
+                            />
                         </UiEntity>
                     )}
                     {presentedFriendship && (
                         <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
-                            <FriendshipToast data={presentedFriendship} />
+                            <FriendshipToast
+                                data={presentedFriendship}
+                                presentation={getActiveCelebrationPresentation(presentedFriendship)}
+                                wide={wide}
+                            />
                         </UiEntity>
                     )}
                 </UiEntity>
@@ -1997,87 +2014,664 @@ function resolveNewConnectionBonusAmount(newConnectionCount: number): number {
     return (definition?.bonusPoints ?? 0) * newConnectionCount
 }
 
+// -----------------------------------------------------------------------
+// CELEBRATION VISUAL TIER SYSTEM - purely presentational, layered entirely on
+// top of the already-validated capture/dedup/duration logic in
+// socialCelebrationQueue.ts/connectionCelebration.ts/friendshipCelebration.ts,
+// which this section only ever READS from (getPresentedCelebration(), the two
+// CELEBRATION_TICKS constants) and never writes back to. NewConnectionToast/
+// FriendshipToast further below stay the only two places that resolve a
+// celebration's title/name/bonus text; CelebrationCard is the only place that
+// decides how a tier actually looks and animates.
+// -----------------------------------------------------------------------
+
+type CelebrationTier = 1 | 2 | 3
+
 /**
- * Single-line toast for a NEW CONNECTION, shown in the right slot of the upper
- * social row (see uiMenu). TITLE / name (singular only) / BONUS SP hierarchy:
- * exactly 1 new partner names them (the detail Social Agenda already covers
- * in full), 2+ collapses straight to a count - never lists multiple names, so
- * the toast can't grow long or wide with a big group. Purely a renderer of
- * the data it's given; builds no relationship/queue logic of its own.
+ * Maps each Friendship milestone's stable id (never the display string, never
+ * a hardcoded rank number) to a visual intensity tier. A future milestone
+ * needs only one more entry here - no other file changes.
  */
-const NewConnectionToast = ({ data }: { data: PresentedNewConnectionCelebration }) => {
-    const count = data.newUserIds.length
-    const titleText = count === 1 ? 'NEW CONNECTION!' : `${count} NEW CONNECTIONS!`
-    const nameText = count === 1 ? getDisplayNameFor(data.newUserIds[0]) ?? QUESTMATE_FALLBACK : null
-    const bonusAmount = resolveNewConnectionBonusAmount(count)
+const CELEBRATION_TIER_BY_MILESTONE_ID: Record<FriendshipMilestoneId, CelebrationTier> = {
+    NEW_CONNECTION: 1,
+    SPARK: 1,
+    FAMILIAR_FACE: 1,
+    FRIENDS: 2,
+    CLOSE_FRIENDS: 2,
+    COSMIC_BOND: 3,
+    FRIENDS_FOREVER: 3
+}
+
+/**
+ * Resolves the visual tier for a presented celebration - a pure function of
+ * already-available data, never a new field on any payload. NEW_CONNECTION is
+ * always Tier 1 (that payload has no `level` field, but by definition it's
+ * always exactly the NEW_CONNECTION milestone). `level === null` (several
+ * partners crossed DIFFERENT levels in the same tick - see
+ * friendshipCelebration.ts's own buildSnapshot doc comment) has no single
+ * resolvable tier either, so it falls back to Tier 1 - the smallest,
+ * least-presumptuous container - rather than guessing.
+ */
+function resolveCelebrationTier(data: PresentedSocialCelebration): CelebrationTier {
+    if (data.type === 'NEW_CONNECTION') return 1
+    if (data.level === null) return 1
+    const definition = FRIENDSHIP_LEVELS.find((level) => level.level === data.level)
+    return definition ? CELEBRATION_TIER_BY_MILESTONE_ID[definition.id] : 1
+}
+
+/**
+ * Pop/exit timing per tier (seconds) - shared by EVERY tier regardless of how
+ * it renders (Tier 1's real PNG asset below, or Tier 2/3's still-code-drawn
+ * box further down). Split out from the old single per-tier visuals table so
+ * the Tier 1 asset swap could remove its now-unused box-drawing fields
+ * without touching timing/lifecycle at all - values themselves unchanged.
+ */
+const CELEBRATION_TIMING: Record<CelebrationTier, { popSeconds: number; exitSeconds: number }> = {
+    1: { popSeconds: 0.18, exitSeconds: 0.35 },
+    2: { popSeconds: 0.22, exitSeconds: 0.45 },
+    3: { popSeconds: 0.28, exitSeconds: 0.5 }
+}
+
+/**
+ * Tier 1's real visual base - replaces the code-drawn cream box/pink border/
+ * circle accents this tier used before. The PNG already bakes in the cream
+ * fill, pink frame, and heart/candy/teal-dot decoration; code only overlays
+ * the three text lines.
+ *
+ * Confirmed via the file's own raw PNG header (never assumed): exactly
+ * 2172x724, a true 3:1 aspect ratio, RGBA with alpha. WIDTH_WIDE/COMPACT below
+ * are both exact multiples of that ratio (HEIGHT is always WIDTH / ratio), so
+ * the artwork is never stretched/deformed.
+ *
+ * The decoration (a large heart top-left, a smaller heart + two teal dots
+ * just under it, two teal dots top-right, a candy bottom-right) occupies
+ * roughly the outer 16% of the width on each side, confirmed by visually
+ * inspecting the asset - CELEBRATION_TIER1_TEXT_ZONE_WIDTH_PERCENT is the
+ * clean 68% left over in the middle, where CelebrationCard centers the text.
+ */
+const CELEBRATION_TIER1_ASSET_PATH = 'assets/images/social-celebration-tier1.png'
+const CELEBRATION_TIER1_ASPECT_RATIO = 2172 / 724
+const CELEBRATION_TIER1_WIDTH_WIDE = 240
+const CELEBRATION_TIER1_WIDTH_COMPACT = 192
+const CELEBRATION_TIER1_HEIGHT_WIDE = CELEBRATION_TIER1_WIDTH_WIDE / CELEBRATION_TIER1_ASPECT_RATIO
+const CELEBRATION_TIER1_HEIGHT_COMPACT = CELEBRATION_TIER1_WIDTH_COMPACT / CELEBRATION_TIER1_ASPECT_RATIO
+const CELEBRATION_TIER1_TEXT_ZONE_WIDTH_PERCENT = '68%'
+/**
+ * Content is now always exactly TITLE + BONUS SP (no name/subtitle line - see
+ * CelebrationCard's own `name` prop, kept but currently never passed a
+ * non-null value by any adapter, per explicit "no names" product decision).
+ * With only 2 rows guaranteed instead of up to 3, there's real headroom
+ * inside the 80/64px-tall card, so these are sized UP from the original
+ * 3-row pass rather than kept small - this is also what fixes the earlier
+ * "title too high / bonus spilling below the asset" visual bug: that was
+ * this same 2-row content trying to center inside spacing tuned for a
+ * 3-row worst case.
+ */
+const CELEBRATION_TIER1_TITLE_FONT_SIZE_WIDE = 18
+const CELEBRATION_TIER1_TITLE_FONT_SIZE_COMPACT = 15
+const CELEBRATION_TIER1_NAME_FONT_SIZE_WIDE = 12
+const CELEBRATION_TIER1_NAME_FONT_SIZE_COMPACT = 10
+const CELEBRATION_TIER1_BONUS_FONT_SIZE_WIDE = 16
+const CELEBRATION_TIER1_BONUS_FONT_SIZE_COMPACT = 13
+/**
+ * Gap between TITLE and BONUS SP in the (now permanent) no-name 2-row case -
+ * a NEGATIVE margin, deliberately: each Label's own line-box carries more
+ * built-in vertical whitespace above/below its glyphs than the visible text
+ * needs, so a small negative value eats into that whitespace to pull the two
+ * lines into a visually tighter, more compact block, rather than adding real
+ * empty space between them. Both rows sit inside a `justifyContent: 'center'`
+ * column, so shrinking the gap this way automatically nudges TITLE down and
+ * BONUS up in tandem while keeping the pair centered as a whole - no separate
+ * per-label offset needed.
+ */
+const CELEBRATION_TIER1_BONUS_MARGIN_TOP_WIDE = -4
+const CELEBRATION_TIER1_BONUS_MARGIN_TOP_COMPACT = -3
+
+/**
+ * Tier 2's real visual base - replaces the code-drawn cream box/gold border/
+ * accent circle this tier used before (same swap already done for Tier 1).
+ * The PNG already bakes in the cream fill, double gold frame, pink base,
+ * left medallion with two hearts + ribbons + sparkles, and right heart/
+ * sparkle cluster; code only overlays TITLE + BONUS SP.
+ *
+ * Confirmed via the file's own raw PNG header (never assumed): 1983x793,
+ * aspect ratio exactly 1983/793 (~2.5) - WIDTH_WIDE/COMPACT below are both
+ * divided by that exact ratio for HEIGHT, so the artwork is never stretched.
+ *
+ * Unlike Tier 1's symmetric decoration, Tier 2's clean cream zone is NOT
+ * centered: the left medallion cluster is visually wider (~30% of the width)
+ * than the right heart/sparkle cluster (~14%), confirmed by inspecting the
+ * asset - so the safe text zone is positioned with LEFT_PERCENT (not just
+ * centered via a percentage width) to sit inside the actually-clean space
+ * rather than the card's raw geometric center.
+ */
+const CELEBRATION_TIER2_ASSET_PATH = 'assets/images/social-celebration-tier2.png'
+const CELEBRATION_TIER2_ASPECT_RATIO = 1983 / 793
+const CELEBRATION_TIER2_WIDTH_WIDE = 260
+const CELEBRATION_TIER2_WIDTH_COMPACT = 205
+const CELEBRATION_TIER2_HEIGHT_WIDE = CELEBRATION_TIER2_WIDTH_WIDE / CELEBRATION_TIER2_ASPECT_RATIO
+const CELEBRATION_TIER2_HEIGHT_COMPACT = CELEBRATION_TIER2_WIDTH_COMPACT / CELEBRATION_TIER2_ASPECT_RATIO
+const CELEBRATION_TIER2_TEXT_ZONE_LEFT_PERCENT = '30%'
+const CELEBRATION_TIER2_TEXT_ZONE_WIDTH_PERCENT = '56%'
+/**
+ * Vertical safe area - deliberately smaller than the full 100% height (unlike
+ * Tier 1) and split into two EXPLICIT, EQUAL-HEIGHT rows (see the tier===2
+ * branch's own JSX) rather than relying on a margin between two Labels
+ * stacked in a centered column. A margin-based gap didn't work here: each
+ * Label's own line-box reserves more vertical space than its visible glyphs
+ * need, and no margin value (positive or negative) reliably compensated for
+ * it - the previous CELEBRATION_TIER2_BONUS_MARGIN_TOP_* constants are gone.
+ * This structural 2-row split makes TITLE's and BONUS's positions a direct,
+ * predictable function of the safe area's own top/height, immune to either
+ * Label's line-box quirks.
+ */
+const CELEBRATION_TIER2_TEXT_ZONE_TOP_PERCENT_WIDE = '20%'
+const CELEBRATION_TIER2_TEXT_ZONE_HEIGHT_PERCENT_WIDE = '60%'
+const CELEBRATION_TIER2_TEXT_ZONE_TOP_PERCENT_COMPACT = '19%'
+const CELEBRATION_TIER2_TEXT_ZONE_HEIGHT_PERCENT_COMPACT = '62%'
+/** Bigger than Tier 1's (18/15 WIDE/COMPACT) - "algo más de presencia", and the taller card leaves real room for it. */
+const CELEBRATION_TIER2_TITLE_FONT_SIZE_WIDE = 22
+const CELEBRATION_TIER2_TITLE_FONT_SIZE_COMPACT = 18
+/**
+ * Smaller variant used only for long titles ("CLOSE FRIENDS!", 14 chars, vs
+ * "FRIENDS!"'s 8) - see getCelebrationTitleFontSize below. Conservative first
+ * pass (lower end of the requested 18-19/15-16 range) so the longer title
+ * comfortably clears Tier 2's own 56%-wide safe area without wrapping or
+ * invading the medallion/hearts - can be nudged up after visual QA if there's
+ * room to spare.
+ */
+const CELEBRATION_TIER2_TITLE_FONT_SIZE_LONG_WIDE = 18
+const CELEBRATION_TIER2_TITLE_FONT_SIZE_LONG_COMPACT = 15
+/** Bigger than Tier 1's bonus (16/13 WIDE/COMPACT) - "suficientemente grande para sentirse como reward". */
+const CELEBRATION_TIER2_BONUS_FONT_SIZE_WIDE = 19
+const CELEBRATION_TIER2_BONUS_FONT_SIZE_COMPACT = 15
+/**
+ * Nudges ONLY the bonus row up a few px via relative-position offset (never
+ * removed from flex flow, never a margin on the Label itself - see the
+ * tier===2 branch's own JSX) - TITLE's row is completely untouched by this.
+ * A small remaining visual imbalance after the row-split fix: BONUS still
+ * read slightly low within its own row's centered space.
+ */
+const CELEBRATION_TIER2_BONUS_ROW_OFFSET_Y_WIDE = -4
+const CELEBRATION_TIER2_BONUS_ROW_OFFSET_Y_COMPACT = -3
+
+/**
+ * Small, purely-visual length-based font-size step for celebration titles -
+ * same per-character-length-threshold idiom already used by answerFontSize
+ * for the answer buttons. Reads only the already-resolved title STRING's
+ * length; never touches FRIENDSHIP_LEVELS, milestone ids, or any gameplay
+ * data. Tier 1's similarly-long "FAMILIAR FACE!" (14 chars) already fits fine
+ * at its own approved base size, so Tier 1 has no "long" variant and stays
+ * fully untouched here. Tier 2 ("CLOSE FRIENDS!", 14 chars) and Tier 3
+ * ("FRIENDS FOREVER!", 16 chars) both do - their own safe areas are narrower
+ * relative to their base fonts. "COSMIC BOND!" is exactly 12 chars, so it
+ * lands on the `> threshold` boundary and correctly stays at Tier 3's normal
+ * size. Extending protection to a future long title is just one more branch
+ * here, never a change to FRIENDSHIP_LEVELS or the milestone names
+ * themselves.
+ */
+const CELEBRATION_TITLE_LONG_CHARS_THRESHOLD = 12
+
+function getCelebrationTitleFontSize(tier: CelebrationTier, title: string, wide: boolean): number {
+    const isLong = title.length > CELEBRATION_TITLE_LONG_CHARS_THRESHOLD
+    if (tier === 2 && isLong) return wide ? CELEBRATION_TIER2_TITLE_FONT_SIZE_LONG_WIDE : CELEBRATION_TIER2_TITLE_FONT_SIZE_LONG_COMPACT
+    if (tier === 2) return wide ? CELEBRATION_TIER2_TITLE_FONT_SIZE_WIDE : CELEBRATION_TIER2_TITLE_FONT_SIZE_COMPACT
+    if (tier === 3 && isLong) return wide ? CELEBRATION_TIER3_TITLE_FONT_SIZE_LONG_WIDE : CELEBRATION_TIER3_TITLE_FONT_SIZE_LONG_COMPACT
+    if (tier === 3) return wide ? CELEBRATION_TIER3_TITLE_FONT_SIZE_WIDE : CELEBRATION_TIER3_TITLE_FONT_SIZE_COMPACT
+    return wide ? CELEBRATION_TIER1_TITLE_FONT_SIZE_WIDE : CELEBRATION_TIER1_TITLE_FONT_SIZE_COMPACT
+}
+
+/**
+ * Tier 3's real visual base - replaces the code-drawn cream box/gold border
+ * this tier used before (same swap already done for Tier 1/2). The PNG
+ * already bakes in the cream fill, premium double gold frame, a large winged
+ * heart medallion with a crown and ribbons on the LEFT, heart clusters +
+ * sparkles on the right, AND small sparkle/heart accents along the top and
+ * bottom of the frame itself (unlike Tier 1/2, which only had left/right
+ * decoration) - code only overlays TITLE + BONUS SP.
+ *
+ * Confirmed via the file's own raw PNG header (never assumed): 1983x793,
+ * same exact ratio as Tier 2's asset (1983/793, ~2.5) - WIDTH_WIDE/COMPACT
+ * below are both divided by that exact ratio for HEIGHT, so the artwork is
+ * never stretched.
+ *
+ * Decoration, confirmed by inspecting the asset:
+ * - LEFT: the winged heart medallion + crown + ribbons is large, occupying
+ *   roughly the outer 31% of the width - noticeably bigger than Tier 2's own
+ *   left medallion.
+ * - RIGHT: heart clusters + sparkles occupy roughly the outer 14%.
+ * - TOP/BOTTOM: small sparkle+heart accents sit directly on the gold frame
+ *   line near horizontal center, roughly the top ~9-23% and bottom ~73-82%
+ *   of the height - Tier 2 has no equivalent, so Tier 3's vertical safe area
+ *   is deliberately smaller/more centered than Tier 2's to clear both.
+ */
+const CELEBRATION_TIER3_ASSET_PATH = 'assets/images/social-celebration-tier3.png'
+const CELEBRATION_TIER3_ASPECT_RATIO = 1983 / 793
+const CELEBRATION_TIER3_WIDTH_WIDE = 280
+const CELEBRATION_TIER3_WIDTH_COMPACT = 220
+const CELEBRATION_TIER3_HEIGHT_WIDE = CELEBRATION_TIER3_WIDTH_WIDE / CELEBRATION_TIER3_ASPECT_RATIO
+const CELEBRATION_TIER3_HEIGHT_COMPACT = CELEBRATION_TIER3_WIDTH_COMPACT / CELEBRATION_TIER3_ASPECT_RATIO
+/** Nudged right and narrowed from the first pass (32%/54%) - "COSMIC BOND!"'s leading C was crowding the left decoration at 32%. */
+const CELEBRATION_TIER3_TEXT_ZONE_LEFT_PERCENT = '34%'
+const CELEBRATION_TIER3_TEXT_ZONE_WIDTH_PERCENT = '52%'
+/** Smaller/more centered than Tier 2's (20%/60% WIDE, 19%/62% COMPACT) - clears the extra top/bottom sparkle accents this asset has that Tier 2's doesn't. Same explicit 2-row structure as Tier 2 (see the tier===3 branch's own JSX), never a margin between two Labels. */
+const CELEBRATION_TIER3_TEXT_ZONE_TOP_PERCENT_WIDE = '24%'
+const CELEBRATION_TIER3_TEXT_ZONE_HEIGHT_PERCENT_WIDE = '50%'
+const CELEBRATION_TIER3_TEXT_ZONE_TOP_PERCENT_COMPACT = '23%'
+const CELEBRATION_TIER3_TEXT_ZONE_HEIGHT_PERCENT_COMPACT = '52%'
+/**
+ * "más presencia que Tier 2" (whose normal title is 22/18) still holds even
+ * after this second nudge down - Tier 3's title stays at least as large as
+ * Tier 2's own long-title variant (18/15), never smaller. Two rounds of
+ * shrinking so far: 24/19 (first pass) -> 22/18 (after narrowing the safe
+ * area) -> 21/17 (this pass) - "COSMIC BOND!" still read slightly large for
+ * the safe area at 22/18.
+ */
+const CELEBRATION_TIER3_TITLE_FONT_SIZE_WIDE = 21
+const CELEBRATION_TIER3_TITLE_FONT_SIZE_COMPACT = 17
+/**
+ * Smaller variant for "FRIENDS FOREVER!" (16 chars, vs "COSMIC BOND!"'s 12 -
+ * exactly at CELEBRATION_TITLE_LONG_CHARS_THRESHOLD, so it stays at the
+ * normal size) - see getCelebrationTitleFontSize below. Nudged down from the
+ * first pass (17/14) for the same reason as the normal size above.
+ */
+const CELEBRATION_TIER3_TITLE_FONT_SIZE_LONG_WIDE = 16
+const CELEBRATION_TIER3_TITLE_FONT_SIZE_LONG_COMPACT = 13
+/** Bigger than Tier 2's bonus (19/15 WIDE/COMPACT) - "grande y claramente premium". */
+const CELEBRATION_TIER3_BONUS_FONT_SIZE_WIDE = 20
+const CELEBRATION_TIER3_BONUS_FONT_SIZE_COMPACT = 16
+
+/**
+ * Stable-enough identity for "is this the same celebration still showing, or
+ * a new one" - derived purely from the presented data's own visible fields,
+ * since neither PresentedNewConnectionCelebration nor
+ * PresentedFriendshipCelebration exposes socialCelebrationQueue's internal
+ * `${type}:${roundId}` key, and this module never reaches into that queue for
+ * it (see file-level "NO TOCAR" list). A late partner merging into an
+ * ALREADY-visible celebration (see connectionCelebration.ts/
+ * friendshipCelebration.ts's own "merge in place" doc comments) changes this
+ * fingerprint and restarts the entrance animation - treated as correct, not a
+ * bug: genuinely new information just arrived.
+ */
+function celebrationFingerprint(data: PresentedSocialCelebration): string {
+    if (data.type === 'NEW_CONNECTION') {
+        return `NEW_CONNECTION:${[...data.newUserIds].sort().join(',')}`
+    }
+    return `FRIENDSHIP:${[...data.userIds].sort().join(',')}:${data.level ?? 'null'}`
+}
+
+let celebrationFingerprintSeen: string | null = null
+let celebrationElapsedSeconds = 0
+
+/**
+ * Same architecture as socialPointsFeedback.ts's own POP/HOLD/EXIT
+ * accumulator driving SocialPointsValidRoundToast - a dedicated
+ * engine.addSystem (registered once from setupUi() above) accumulating
+ * elapsed seconds for whatever socialCelebrationQueue currently presents, as
+ * this file's own fully independent instance. Reads getPresentedCelebration()
+ * only - never writes back to socialCelebrationQueue.ts/
+ * connectionCelebration.ts/friendshipCelebration.ts, whose capture/dedup/
+ * duration logic this treats as already-validated and untouched.
+ */
+function tickCelebrationPresentation(dt: number): void {
+    const presented = getPresentedCelebration()
+    if (presented === null) {
+        celebrationFingerprintSeen = null
+        celebrationElapsedSeconds = 0
+        return
+    }
+    const fingerprint = celebrationFingerprint(presented)
+    if (fingerprint !== celebrationFingerprintSeen) {
+        celebrationFingerprintSeen = fingerprint
+        celebrationElapsedSeconds = 0
+    } else {
+        celebrationElapsedSeconds += dt
+    }
+}
+
+interface ActiveCelebrationPresentation {
+    tier: CelebrationTier
+    phase: 'pop' | 'hold' | 'exit'
+    phaseProgress: number
+    elapsedSeconds: number
+}
+
+/**
+ * Derives the current pop/hold/exit phase from this file's own
+ * celebrationElapsedSeconds accumulator - same phase/phaseProgress shape as
+ * ActiveSocialPointsReward, deliberately, so CelebrationCard's animation math
+ * reads the same way SocialPointsValidRoundToast's already does. Total
+ * duration is NEVER hand-duplicated - always the real CELEBRATION_TICKS
+ * constant imported from whichever source module owns this celebration type,
+ * so this can never drift from the queue's own already-validated timing.
+ */
+function getActiveCelebrationPresentation(data: PresentedSocialCelebration): ActiveCelebrationPresentation {
+    const tier = resolveCelebrationTier(data)
+    const totalDurationSeconds = data.type === 'NEW_CONNECTION' ? NEW_CONNECTION_CELEBRATION_TICKS : FRIENDSHIP_CELEBRATION_TICKS
+    const { popSeconds, exitSeconds } = CELEBRATION_TIMING[tier]
+    const elapsedSeconds = celebrationElapsedSeconds
+
+    if (elapsedSeconds < popSeconds) {
+        return { tier, phase: 'pop', phaseProgress: popSeconds > 0 ? elapsedSeconds / popSeconds : 1, elapsedSeconds }
+    }
+    const exitStart = totalDurationSeconds - exitSeconds
+    if (elapsedSeconds >= exitStart) {
+        return { tier, phase: 'exit', phaseProgress: exitSeconds > 0 ? Math.min(1, (elapsedSeconds - exitStart) / exitSeconds) : 1, elapsedSeconds }
+    }
+    const holdDuration = exitStart - popSeconds
+    return { tier, phase: 'hold', phaseProgress: holdDuration > 0 ? (elapsedSeconds - popSeconds) / holdDuration : 1, elapsedSeconds }
+}
+
+/**
+ * Maps phase/phaseProgress to opacity+scale. Tier 1 is a plain lerp (pop
+ * suave / fade simple, per the approved spec). Tier 2/3 pop with a small
+ * overshoot-then-settle (more pronounced the higher the tier) before holding
+ * at rest. Exit is a straight fade for every tier; Tier 2 also eases its
+ * scale down slightly ("reducción suave"); Tier 3 fades only - its sparkles
+ * carry the rest of the motion (see CelebrationCard's own sparkle rendering).
+ */
+function getCelebrationVisualState(tier: CelebrationTier, phase: 'pop' | 'hold' | 'exit', phaseProgress: number): { opacity: number; scale: number } {
+    if (phase === 'hold') return { opacity: 1, scale: 1 }
+
+    if (phase === 'pop') {
+        if (tier === 1) {
+            return { opacity: phaseProgress, scale: 0.85 + 0.15 * phaseProgress }
+        }
+        const overshootScale = tier === 2 ? 1.05 : 1.08
+        const startScale = tier === 2 ? 0.75 : 0.7
+        const growPortion = 0.7 // first 70% of the pop grows past 1.0 into the overshoot, remaining 30% settles back to 1.0
+        if (phaseProgress < growPortion) {
+            const t = phaseProgress / growPortion
+            return { opacity: Math.min(1, phaseProgress / 0.5), scale: startScale + (overshootScale - startScale) * t }
+        }
+        const t = (phaseProgress - growPortion) / (1 - growPortion)
+        return { opacity: 1, scale: overshootScale + (1 - overshootScale) * t }
+    }
+
+    // exit
+    return { opacity: 1 - phaseProgress, scale: tier === 2 ? 1 - 0.05 * phaseProgress : 1 }
+}
+
+interface CelebrationCardProps {
+    tier: CelebrationTier
+    title: string
+    name: string | null
+    bonusText: string | null
+    presentation: ActiveCelebrationPresentation
+    wide: boolean
+}
+
+/**
+ * The ONLY place that decides a celebration's size/color/border/decoration/
+ * animation. NewConnectionToast/FriendshipToast below only ever resolve their
+ * own title/name/bonus strings (same logic as before this pass) and hand
+ * them here along with the already-resolved tier - zero visual JSX
+ * duplicated between the two celebration types.
+ */
+const CelebrationCard = ({ tier, title, name, bonusText, presentation, wide }: CelebrationCardProps) => {
+    const { opacity, scale } = getCelebrationVisualState(tier, presentation.phase, presentation.phaseProgress)
+
+    if (tier === 1) {
+        const baseWidth = wide ? CELEBRATION_TIER1_WIDTH_WIDE : CELEBRATION_TIER1_WIDTH_COMPACT
+        const baseHeight = wide ? CELEBRATION_TIER1_HEIGHT_WIDE : CELEBRATION_TIER1_HEIGHT_COMPACT
+        const titleFontSize = wide ? CELEBRATION_TIER1_TITLE_FONT_SIZE_WIDE : CELEBRATION_TIER1_TITLE_FONT_SIZE_COMPACT
+        const nameFontSize = wide ? CELEBRATION_TIER1_NAME_FONT_SIZE_WIDE : CELEBRATION_TIER1_NAME_FONT_SIZE_COMPACT
+        const bonusFontSize = wide ? CELEBRATION_TIER1_BONUS_FONT_SIZE_WIDE : CELEBRATION_TIER1_BONUS_FONT_SIZE_COMPACT
+
+        return (
+            // Outer box: the PNG IS the background - no uiBackground.color, no
+            // borderColor/borderWidth/borderRadius of our own (all baked into the
+            // asset). Same width/height-as-scale pop/exit technique as Tier 2/3
+            // below, and the same texture+color-as-tint-alpha fade already proven
+            // for SocialPointsValidRoundToast's heart.
+            <UiEntity
+                uiTransform={{ width: baseWidth * scale, height: baseHeight * scale, justifyContent: 'center', alignItems: 'center' }}
+                uiBackground={{ texture: { src: CELEBRATION_TIER1_ASSET_PATH }, textureMode: 'stretch', color: Color4.create(1, 1, 1, opacity) }}
+            >
+                {/* Clean central zone, free of the asset's own corner decoration - see
+                    CELEBRATION_TIER1_TEXT_ZONE_WIDTH_PERCENT's own doc comment. */}
+                <UiEntity
+                    uiTransform={{
+                        width: CELEBRATION_TIER1_TEXT_ZONE_WIDTH_PERCENT,
+                        height: '100%',
+                        flexDirection: 'column',
+                        justifyContent: 'center',
+                        alignItems: 'center'
+                    }}
+                >
+                    <Label
+                        value={title}
+                        fontSize={titleFontSize}
+                        color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
+                        textAlign="middle-center"
+                        textWrap="nowrap"
+                    />
+                    {name !== null && (
+                        <Label
+                            value={name}
+                            fontSize={nameFontSize}
+                            color={Color4.create(MUTED.r, MUTED.g, MUTED.b, opacity)}
+                            textAlign="middle-center"
+                            textWrap="nowrap"
+                            uiTransform={{ margin: { top: 2 } }}
+                        />
+                    )}
+                    {bonusText !== null && (
+                        <Label
+                            value={bonusText}
+                            fontSize={bonusFontSize}
+                            color={Color4.create(AGENDA_TEAL.r, AGENDA_TEAL.g, AGENDA_TEAL.b, opacity)}
+                            textAlign="middle-center"
+                            uiTransform={{
+                                margin: { top: name !== null ? 3 : wide ? CELEBRATION_TIER1_BONUS_MARGIN_TOP_WIDE : CELEBRATION_TIER1_BONUS_MARGIN_TOP_COMPACT }
+                            }}
+                        />
+                    )}
+                </UiEntity>
+            </UiEntity>
+        )
+    }
+
+    if (tier === 2) {
+        const baseWidth = wide ? CELEBRATION_TIER2_WIDTH_WIDE : CELEBRATION_TIER2_WIDTH_COMPACT
+        const baseHeight = wide ? CELEBRATION_TIER2_HEIGHT_WIDE : CELEBRATION_TIER2_HEIGHT_COMPACT
+        const titleFontSize = getCelebrationTitleFontSize(tier, title, wide)
+        const bonusFontSize = wide ? CELEBRATION_TIER2_BONUS_FONT_SIZE_WIDE : CELEBRATION_TIER2_BONUS_FONT_SIZE_COMPACT
+        const textZoneTop = wide ? CELEBRATION_TIER2_TEXT_ZONE_TOP_PERCENT_WIDE : CELEBRATION_TIER2_TEXT_ZONE_TOP_PERCENT_COMPACT
+        const textZoneHeight = wide ? CELEBRATION_TIER2_TEXT_ZONE_HEIGHT_PERCENT_WIDE : CELEBRATION_TIER2_TEXT_ZONE_HEIGHT_PERCENT_COMPACT
+        const bonusRowOffsetY = wide ? CELEBRATION_TIER2_BONUS_ROW_OFFSET_Y_WIDE : CELEBRATION_TIER2_BONUS_ROW_OFFSET_Y_COMPACT
+
+        return (
+            // Same pattern as Tier 1: the PNG IS the background - no
+            // uiBackground.color, no borderColor/borderWidth/borderRadius, no
+            // code-drawn accent circle (all baked into the asset - medallion,
+            // hearts, ribbons, sparkles). Same width/height-as-scale pop/exit
+            // technique, same texture+color-as-tint-alpha fade.
+            <UiEntity
+                uiTransform={{ width: baseWidth * scale, height: baseHeight * scale, justifyContent: 'center', alignItems: 'center' }}
+                uiBackground={{ texture: { src: CELEBRATION_TIER2_ASSET_PATH }, textureMode: 'stretch', color: Color4.create(1, 1, 1, opacity) }}
+            >
+                {/* Clean zone, free of the asset's own left medallion / right hearts+
+                    sparkles (horizontal - see CELEBRATION_TIER2_TEXT_ZONE_LEFT_PERCENT's
+                    own doc comment) AND vertically smaller than the full card height
+                    (see CELEBRATION_TIER2_TEXT_ZONE_TOP_PERCENT_*'s own doc comment) -
+                    split into two EXPLICIT, equal-height rows rather than a margin
+                    between two Labels in a centered column, so TITLE/BONUS's positions
+                    are a direct, predictable function of this box's own geometry. */}
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { left: CELEBRATION_TIER2_TEXT_ZONE_LEFT_PERCENT, top: textZoneTop },
+                        width: CELEBRATION_TIER2_TEXT_ZONE_WIDTH_PERCENT,
+                        height: textZoneHeight,
+                        flexDirection: 'column'
+                    }}
+                >
+                    {/* ROW 1 - TITLE, centered in the top half of the safe area. */}
+                    <UiEntity uiTransform={{ width: '100%', height: '50%', justifyContent: 'center', alignItems: 'center' }}>
+                        <Label
+                            value={title}
+                            fontSize={titleFontSize}
+                            color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
+                            textAlign="middle-center"
+                            textWrap="nowrap"
+                        />
+                    </UiEntity>
+                    {/* ROW 2 - BONUS SP, centered in the bottom half of the safe area. The
+                        small `top` offset is a RELATIVE position nudge (positionType stays
+                        the Yoga default 'relative', never 'absolute') - it shifts this row
+                        visually without removing it from the flex column or touching TITLE's
+                        own row at all, and never via a margin on the Label itself. */}
+                    <UiEntity
+                        uiTransform={{ width: '100%', height: '50%', justifyContent: 'center', alignItems: 'center', position: { top: bonusRowOffsetY } }}
+                    >
+                        {bonusText !== null && (
+                            <Label
+                                value={bonusText}
+                                fontSize={bonusFontSize}
+                                color={Color4.create(AGENDA_TEAL.r, AGENDA_TEAL.g, AGENDA_TEAL.b, opacity)}
+                                textAlign="middle-center"
+                            />
+                        )}
+                    </UiEntity>
+                </UiEntity>
+            </UiEntity>
+        )
+    }
+
+    // tier === 3 - same asset-based pattern as Tier 1/2. Sparkles are NOT
+    // rendered programmatically here (celebrationSparkles is unused/removed) -
+    // the asset already has its own baked-in sparkles/hearts/crown, and
+    // layering more on top would clutter rather than help; "que prime la
+    // limpieza visual" per explicit instruction.
+    const baseWidth = wide ? CELEBRATION_TIER3_WIDTH_WIDE : CELEBRATION_TIER3_WIDTH_COMPACT
+    const baseHeight = wide ? CELEBRATION_TIER3_HEIGHT_WIDE : CELEBRATION_TIER3_HEIGHT_COMPACT
+    const titleFontSize = getCelebrationTitleFontSize(tier, title, wide)
+    const bonusFontSize = wide ? CELEBRATION_TIER3_BONUS_FONT_SIZE_WIDE : CELEBRATION_TIER3_BONUS_FONT_SIZE_COMPACT
+    const textZoneTop = wide ? CELEBRATION_TIER3_TEXT_ZONE_TOP_PERCENT_WIDE : CELEBRATION_TIER3_TEXT_ZONE_TOP_PERCENT_COMPACT
+    const textZoneHeight = wide ? CELEBRATION_TIER3_TEXT_ZONE_HEIGHT_PERCENT_WIDE : CELEBRATION_TIER3_TEXT_ZONE_HEIGHT_PERCENT_COMPACT
 
     return (
+        // Same pattern as Tier 1/2: the PNG IS the background - no
+        // uiBackground.color, no borderColor/borderWidth/borderRadius, no
+        // code-drawn medallion/hearts/sparkles (all baked into the asset).
+        // Same width/height-as-scale pop/exit technique, same
+        // texture+color-as-tint-alpha fade.
         <UiEntity
-            uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
-            uiBackground={{ color: Color4.create(0.35, 0.08, 0.25, 0.92) }}
+            uiTransform={{ width: baseWidth * scale, height: baseHeight * scale, justifyContent: 'center', alignItems: 'center' }}
+            uiBackground={{ texture: { src: CELEBRATION_TIER3_ASSET_PATH }, textureMode: 'stretch', color: Color4.create(1, 1, 1, opacity) }}
         >
-            <Label value={titleText} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
-            {nameText !== null && (
-                <Label
-                    value={nameText}
-                    fontSize={14}
-                    color={MUTED}
-                    textAlign="middle-center"
-                    textWrap="nowrap"
-                    uiTransform={{ margin: { top: 2 } }}
-                />
-            )}
-            <Label value={`+${bonusAmount} SP`} fontSize={15} color={AGENDA_TEAL} textAlign="middle-center" uiTransform={{ margin: { top: 4 } }} />
+            {/* Clean zone, free of the asset's own left medallion/crown/ribbons,
+                right hearts+sparkles, AND the extra top/bottom sparkle+heart
+                accents this asset has that Tier 2's doesn't - see
+                CELEBRATION_TIER3_TEXT_ZONE_*'s own doc comment. Same explicit
+                2-row split as Tier 2, never a margin between two Labels. */}
+            <UiEntity
+                uiTransform={{
+                    positionType: 'absolute',
+                    position: { left: CELEBRATION_TIER3_TEXT_ZONE_LEFT_PERCENT, top: textZoneTop },
+                    width: CELEBRATION_TIER3_TEXT_ZONE_WIDTH_PERCENT,
+                    height: textZoneHeight,
+                    flexDirection: 'column'
+                }}
+            >
+                {/* ROW 1 - TITLE, centered in the top half of the safe area. */}
+                <UiEntity uiTransform={{ width: '100%', height: '50%', justifyContent: 'center', alignItems: 'center' }}>
+                    <Label
+                        value={title}
+                        fontSize={titleFontSize}
+                        color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
+                        textAlign="middle-center"
+                        textWrap="nowrap"
+                    />
+                </UiEntity>
+                {/* ROW 2 - BONUS SP, centered in the bottom half of the safe area. */}
+                <UiEntity uiTransform={{ width: '100%', height: '50%', justifyContent: 'center', alignItems: 'center' }}>
+                    {bonusText !== null && (
+                        <Label
+                            value={bonusText}
+                            fontSize={bonusFontSize}
+                            color={Color4.create(AGENDA_TEAL.r, AGENDA_TEAL.g, AGENDA_TEAL.b, opacity)}
+                            textAlign="middle-center"
+                        />
+                    )}
+                </UiEntity>
+            </UiEntity>
         </UiEntity>
     )
 }
 
 /**
- * Single-line toast for a FRIENDSHIP LEVEL UP. Same TITLE / name-or-summary /
- * BONUS SP hierarchy as NewConnectionToast above: exactly 1 partner at this
- * level names them, 2+ AT THE SAME level collapses to a short count summary -
- * never lists multiple names. The bonus is resolved from FRIENDSHIP_LEVELS by
- * `data.level` (never a hardcoded number) and multiplied by how many partners
- * reached that SAME level this tick, matching exactly what
- * socialPointsFeedback.ts's counter already added (one queueReward() call per
- * crossing).
- *
- * `data.level` is `null` when several partners crossed DIFFERENT levels in
- * the same tick (see friendshipCelebration.ts's own buildSnapshot doc
- * comment) - there is no single resolvable level, name, or bonus amount in
- * that case (each partner earned something different), so this keeps the
- * existing generic "LEVEL UP" title only, with no name and no SP line rather
- * than inventing any of the three. A known, accepted limitation of the
- * current celebration payload, not solved in this pass.
+ * Adapter for a NEW CONNECTION celebration - resolves title/bonus text (bonus
+ * always resolved from FRIENDSHIP_LEVELS by id), then hands the result to the
+ * shared CelebrationCard. No name/subtitle line at all, per explicit product
+ * decision - names are already browsable in Social Agenda, and the
+ * celebration is meant to be read at a glance: TITLE, then BONUS SP.
  */
-const FriendshipToast = ({ data }: { data: PresentedFriendshipCelebration }) => {
+const NewConnectionToast = ({
+    data,
+    presentation,
+    wide
+}: {
+    data: PresentedNewConnectionCelebration
+    presentation: ActiveCelebrationPresentation
+    wide: boolean
+}) => {
+    const count = data.newUserIds.length
+    const titleText = count === 1 ? 'NEW CONNECTION!' : `${count} NEW CONNECTIONS!`
+    const bonusAmount = resolveNewConnectionBonusAmount(count)
+
+    return (
+        <CelebrationCard
+            tier={presentation.tier}
+            title={titleText}
+            name={null}
+            bonusText={`+${bonusAmount} SP`}
+            presentation={presentation}
+            wide={wide}
+        />
+    )
+}
+
+/**
+ * Adapter for a FRIENDSHIP LEVEL UP celebration - resolves title/bonus text
+ * (bonus resolved from FRIENDSHIP_LEVELS by `data.level`, multiplied by how
+ * many partners reached that SAME level this tick), then hands the result to
+ * the shared CelebrationCard. No name/subtitle line at all, per explicit
+ * product decision - the aggregated bonus already communicates "more than
+ * one" without needing a count-summary line spelled out.
+ *
+ * `data.level === null` (several partners crossed DIFFERENT levels in the
+ * same tick) still renders through CelebrationCard, always at Tier 1 (see
+ * resolveCelebrationTier) - just the generic "LEVEL UP!" title, no bonus,
+ * same accepted limitation as before this pass.
+ */
+const FriendshipToast = ({
+    data,
+    presentation,
+    wide
+}: {
+    data: PresentedFriendshipCelebration
+    presentation: ActiveCelebrationPresentation
+    wide: boolean
+}) => {
     if (data.level === null) {
-        return (
-            <UiEntity
-                uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
-                uiBackground={{ color: Color4.create(0.08, 0.2, 0.35, 0.92) }}
-            >
-                <Label value="LEVEL UP!" fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
-            </UiEntity>
-        )
+        return <CelebrationCard tier={presentation.tier} title="LEVEL UP!" name={null} bonusText={null} presentation={presentation} wide={wide} />
     }
 
     const count = data.userIds.length
     const titleText = `${data.level}!`
-    const nameText = count === 1 ? getDisplayNameFor(data.userIds[0]) ?? QUESTMATE_FALLBACK : `${count} CONNECTIONS LEVELED UP`
     const levelDefinition = FRIENDSHIP_LEVELS.find((level) => level.level === data.level)
     const bonusAmount = levelDefinition ? levelDefinition.bonusPoints * count : null
 
     return (
-        <UiEntity
-            uiTransform={{ flexDirection: 'column', alignItems: 'center', padding: { top: 10, bottom: 10, left: 16, right: 16 } }}
-            uiBackground={{ color: Color4.create(0.08, 0.2, 0.35, 0.92) }}
-        >
-            <Label value={titleText} fontSize={18} color={Color4.White()} textAlign="middle-center" textWrap="nowrap" />
-            <Label value={nameText} fontSize={14} color={MUTED} textAlign="middle-center" textWrap="nowrap" uiTransform={{ margin: { top: 2 } }} />
-            {bonusAmount !== null && (
-                <Label value={`+${bonusAmount} SP`} fontSize={15} color={AGENDA_TEAL} textAlign="middle-center" uiTransform={{ margin: { top: 4 } }} />
-            )}
-        </UiEntity>
+        <CelebrationCard
+            tier={presentation.tier}
+            title={titleText}
+            name={null}
+            bonusText={bonusAmount !== null ? `+${bonusAmount} SP` : null}
+            presentation={presentation}
+            wide={wide}
+        />
     )
 }
