@@ -19,8 +19,8 @@ import { registerMessages } from '@dcl/sdk/network'
 /** Which Top Matches ranking a request/response is about - reused verbatim by topMatchesNetwork.ts and leaderboardUi.tsx rather than each redefining their own copy of this union. */
 export type TopMatchesScope = 'thisWeek' | 'allTime'
 
-/** Product-approved page size - 5 pairs per page, same constant reused by topMatchesNetwork.ts's default request and leaderboardUi.tsx's pagination. */
-export const TOP_MATCHES_PAGE_SIZE = 5
+/** Product-approved page size - 4 pairs per page (changed from 5: with 5, each match's 2-line block read as too cramped inside the illustrated panel's safe area - see leaderboardUi.tsx's own TOP_MATCH_ROW_GAP_WIDE/COMPACT), same constant reused by topMatchesNetwork.ts's default request and leaderboardUi.tsx's pagination. Single source of truth: the client sends this value on every request (see requestTopMatches below), the server echoes back whatever pageSize the client asked for, and the UI's totalPages is always derived from the RESPONSE's own pageSize field - so changing this one constant is enough to keep request/response/cache/page-count consistent, no separate server-side value to update. */
+export const TOP_MATCHES_PAGE_SIZE = 4
 
 const TopMatchesMessages = {
     requestTopMatches: Schemas.Map({
