@@ -1,5 +1,6 @@
-import ReactEcs, { Button, Label, ReactEcsRenderer, ScreenInsetArea, UiEntity } from '@dcl/sdk/react-ecs'
+import ReactEcs, { Label, ReactEcsRenderer, ScreenInsetArea, UiEntity } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
+import { myProfile } from '@dcl/sdk/network'
 import { engine, timers, UiCanvasInformation } from '@dcl/sdk/ecs'
 import { isMobile } from '@dcl/sdk/platform'
 import { roundManager, RevealData, RevealEntry } from './roundManager'
@@ -53,6 +54,11 @@ export function setupUi() {
     // tickCelebrationPresentation's own doc comment). Never touches
     // socialCelebrationQueue.ts/connectionCelebration.ts/friendshipCelebration.ts.
     engine.addSystem(tickCelebrationPresentation)
+    // Own independent entrance-fade accumulator for the RESULT reveal - same
+    // pattern as tickCelebrationPresentation above, kept entirely in this file
+    // (see tickResultRevealPresentation's own doc comment). Never touches
+    // roundManager.ts/RESULT_SECONDS/REVEAL_TIMEOUT_SECONDS.
+    engine.addSystem(tickResultRevealPresentation)
 }
 
 /**
@@ -136,13 +142,25 @@ const QUESTMATE_FALLBACK = 'Questmate'
  * LeaderboardPanel), so importing colors back the other way would create a
  * dependency between the two panels for a purely cosmetic reason - "sibling
  * panels, same visual language" is achieved by matching values, not sharing
- * a module. Used only by the Social Agenda block below - every other panel
- * in this file (gameplay, JOIN, celebrations, the still-unstyled HUD icons)
- * keeps its own existing colors untouched.
+ * a module. Originally used only by Social Agenda; since reused for the
+ * celebration cards and the main gameplay panel's own text once both moved
+ * onto cream/pastel backgrounds - the one shared Social Quest palette this
+ * whole file has been converging on, not a Social-Agenda-only set anymore.
  */
 const AGENDA_CREAM = Color4.create(0.97, 0.93, 0.86, 1)
 const AGENDA_PINK = Color4.create(1, 0.75, 0.9, 1)
 const AGENDA_TEAL = Color4.create(0.4, 0.75, 1, 1)
+/**
+ * Dark, desaturated plum - the on-cream counterpart to MUTED (which is a
+ * light gray built for dark backgrounds, e.g. ResultColumn's own dark cards,
+ * the Agenda panel, the HUD - all untouched, still correct there). Added
+ * specifically for secondary/auxiliary text that now sits directly on the
+ * new pastel gameplay panel background (see the panel background's own doc
+ * comment): no existing constant already provided adequate contrast there,
+ * MUTED itself included (0.7,0.7,0.75 reads as near-invisible on the new
+ * cream backdrop).
+ */
+const CREAM_PANEL_TEXT_MUTED = Color4.create(0.45, 0.32, 0.4, 1)
 
 /** Whether the Social Agenda ("VIEW ALL CONNECTIONS") overlay is open - presentation-only, local, never synced. Default: closed. */
 let socialAgendaOpen = false
@@ -201,6 +219,21 @@ function revealUnseenConnections(ids: string[]): void {
 /** Hover/pressed visual state for SocialAgendaButton only - presentation-only, never affects the open/close logic itself. See AGENDA_BUTTON_ICON_SIZE_* constants' own doc comment for how these combine with the open state into one of three icon sizes (idle/hover-or-active/pressed). */
 let socialAgendaButtonHovered = false
 let socialAgendaButtonPressed = false
+
+/**
+ * Hover state for the two ANSWERING option buttons and the JOIN button -
+ * presentation-only, same pattern as socialAgendaButtonHovered above, never
+ * read by roundManager/selectOption. These buttons mount/unmount across
+ * rounds (the answer buttons disappear once locked; JoinScreen disappears
+ * once joined), and an onMouseLeave isn't guaranteed to fire on unmount, so
+ * JoinedGameplay force-resets both answer flags on every render where the
+ * buttons aren't shown, and forces joinButtonHovered false on every render
+ * (it's only ever shown pre-join) - see the reset lines in JoinScreen/
+ * JoinedGameplay for where that happens.
+ */
+let answerOptionAHovered = false
+let answerOptionBHovered = false
+let joinButtonHovered = false
 
 /**
  * Below this render scale, panels declared at their normal size (the 280-wide HUD
@@ -538,8 +571,10 @@ const REVEAL_NAME_ROW_GAP = 4
 
 /**
  * Option-title font sizes and reserved title-area height, ResultColumn's option
- * title (e.g. "B — An Exciting Possibility") can wrap to 2 lines for longer
- * question-bank options. Same root cause as the earlier name-overlap bug: a
+ * title (e.g. "An Exciting Possibility" - just the option text, no "A —"/"B —"
+ * prefix, matching how ANSWERING already presents the same text unlabeled)
+ * can wrap to 2 lines for longer question-bank options. Same root cause as
+ * the earlier name-overlap bug: a
  * bare wrap-enabled Label's rendered height isn't reliably fed back into this
  * SDK's flex layout, so an unsized wrapper let a 2-line title collide with the
  * stats line below it. Fixed the same proven way - an explicit, fixed-height
@@ -558,16 +593,178 @@ const REVEAL_STATS_ROW_HEIGHT_WIDE = 22
 const REVEAL_STATS_ROW_HEIGHT_COMPACT = 18
 
 /**
- * WAITING always uses this compact fixed-size outer panel, on every platform
- * (see uiMenu's isWaitingPhase gate) - WAITING's content is minimal (a short
- * message + a count) on any screen size, so there's no reason to reserve the
- * bigger GAMEPLAY_PANEL_* size ANSWERING/ANSWER LOCKED/RESULT share for it.
- * JOIN keeps its own separate, unrelated sizing (see uiMenu) - untouched here.
+ * RESULT reskin - Social Quest family (cream/pink/teal/magenta) replacing the
+ * old dark-violet/lavender look, which didn't match the palette used
+ * everywhere else (HUD, Social Agenda, celebrations). A and B use IDENTICAL
+ * styling - no green/red, no winner/loser treatment - "social discovery, not
+ * competition" stays true after the reskin.
+ *
+ * "Mint cards" pass: the column fill is now a soft pastel mint, a light
+ * blend of AGENDA_TEAL (Social Quest's existing teal accent) and AGENDA_CREAM
+ * (the panel's own cream) rather than a new hue - deliberately NOT the same
+ * as a semantic "correct answer" green, and both cards always use this exact
+ * same fill regardless of counts/percentages. Text flipped from white (which
+ * only worked against the old dark fill) to CREAM_PANEL_TEXT_MUTED, the same
+ * "on-cream dark plum" text color already used elsewhere on light Social
+ * Quest surfaces - titles use the stronger AGENDA_BADGE_BACKGROUND magenta
+ * instead, for the PANEL CREAM -> MAGENTA TITLE -> MINT CARD -> DARK TEXT
+ * hierarchy.
+ */
+const REVEAL_COLUMN_BACKGROUND = Color4.create(0.77, 0.87, 0.91, 1)
+const REVEAL_COLUMN_BORDER_WIDTH = 1
+/** Rounded a bit more than the old dark card's sharp-ish 10, to read as "cute" against the pastel fill - layout/size untouched, this only affects corner rounding. */
+const REVEAL_COLUMN_BORDER_RADIUS = 16
+
+/**
+ * Purely presentational truncation for a RESULT name row - never touches
+ * entry.name (still resolved exactly as before by buildRevealData/
+ * getDisplayName), only the final display string. Sized to leave room for
+ * the "YOU" badge on the local player's own row.
+ */
+const RESULT_NAME_MAX_CHARS_WIDE = 20
+const RESULT_NAME_MAX_CHARS_COMPACT = 14
+
+function truncateResultName(name: string, wide: boolean): string {
+    const maxChars = wide ? RESULT_NAME_MAX_CHARS_WIDE : RESULT_NAME_MAX_CHARS_COMPACT
+    if (name.length <= maxChars) return name
+    return `${name.slice(0, maxChars - 1)}…`
+}
+
+/**
+ * Short entrance fade+pop for the RESULTS block - see
+ * tickResultRevealPresentation's own doc comment for the edge-detect that
+ * drives it. Width-only "pop" (not a true 2D scale): both ResultColumns have
+ * an exact, already-known base width (320/220), but their HEIGHT is
+ * content-driven (depends on how many names/rows are needed) - scaling an
+ * unknown height would mean re-deriving RevealResults' own row-height math
+ * here just for a barely-visible 8% pop, which isn't worth the fragility for
+ * something this subtle. A width-only grow-in reads as a pop while staying
+ * simple and exactly in sync with the real layout.
+ */
+const RESULT_REVEAL_POP_SECONDS = 0.18
+const RESULT_REVEAL_POP_START_SCALE = 0.92
+
+let resultRevealElapsedSeconds = 0
+let wasShowingResultReveal = false
+
+/**
+ * Edge-detects the exact frame RESULT's reveal first becomes visible
+ * (isRevealing flips to false with real reveal data) and starts a fresh
+ * elapsed-time count from there - NOT a fingerprint of the reveal's content,
+ * deliberately: RevealData is "live-recomputed every read... to absorb
+ * late-arriving answers" (see its own doc comment), so a late answer
+ * refreshing `reveal.entries` mid-RESULT must NOT restart the pop animation,
+ * only the initial appearance should. Never touches roundManager.ts/
+ * RESULT_SECONDS/REVEAL_TIMEOUT_SECONDS - reads roundManager.getSnapshot()
+ * the same way uiMenu/JoinedGameplay already do, purely as this file's own
+ * presentation-layer system (registered once from setupUi()).
+ */
+function tickResultRevealPresentation(dt: number): void {
+    const { phase, isRevealing, reveal } = roundManager.getSnapshot()
+    const showingReveal = phase === 'result' && !isRevealing && reveal !== null
+    if (showingReveal && !wasShowingResultReveal) {
+        resultRevealElapsedSeconds = 0
+    } else if (showingReveal) {
+        resultRevealElapsedSeconds += dt
+    }
+    wasShowingResultReveal = showingReveal
+}
+
+interface ResultRevealPresentation {
+    opacity: number
+    scale: number
+}
+
+function getResultRevealPresentation(): ResultRevealPresentation {
+    const progress = Math.min(1, resultRevealElapsedSeconds / RESULT_REVEAL_POP_SECONDS)
+    return { opacity: progress, scale: RESULT_REVEAL_POP_START_SCALE + (1 - RESULT_REVEAL_POP_START_SCALE) * progress }
+}
+
+/**
+ * "Lobby" tier content sizing - JOIN, WAITING FOR ANOTHER PLAYER, PREPARING...,
+ * and AFK messages (REMOVED/STILL THERE) all share this one family now
+ * (see showingGameplayPanel in uiMenu), instead of JOIN/PREPARING/AFK
+ * previously getting the much bigger gameplay-sized panel by accident.
+ * JOIN keeps its own unrelated sizing note (see uiMenu) only for
+ * showingJoinScreen's extra top margin, not for this width/height itself.
  */
 const WAITING_PANEL_WIDTH = 480
 const WAITING_PANEL_PADDING = 20
 const WAITING_TITLE_FONT_SIZE = 24
-const WAITING_TITLE_MARGIN_BOTTOM = 6
+const WAITING_TITLE_MARGIN_BOTTOM = 10
+/**
+ * Fixed content height for the whole lobby tier (JOIN/WAITING/PREPARING/AFK) -
+ * NOT auto/content-driven, unlike before. Two reasons: (1) "JOIN y WAITING
+ * deben sentirse parte del mismo sistema" - one shared height achieves that
+ * directly; (2) an auto-height box containing a wrap-enabled Label ("Answer
+ * the next question to stay in Social Quest.") doesn't reliably report its
+ * real rendered height back to this SDK's flex layout (the same root cause
+ * documented for the question-overlap and name-list bugs elsewhere in this
+ * file) - the safe-area's own centering was computing against that
+ * unreliable auto-height, which is why STILL THERE rendered too high. A
+ * fixed height sidesteps the measurement entirely. Sized to comfortably fit
+ * the tallest lobby case (JOIN NEXT ROUND's "N PLAYERS ACTIVE" line + the
+ * 90px-tall button, ~137px) with a little room to spare - shorter content
+ * (a single line, or WAITING's two short lines) just centers within the
+ * extra space via the content panel's own justifyContent:'center' (lobby
+ * only - gameplay keeps its existing top-down flow, untouched).
+ */
+const LOBBY_PANEL_HEIGHT = 145
+
+/**
+ * Social Quest decorative panel background - replaces BOTH the flat dark
+ * `Color4.create(0.05, 0.05, 0.1, 0.85)` fill AND the separate graphic logo
+ * that briefly replaced the yellow "SOCIAL QUEST" text (this new asset
+ * already bakes that same logo art into its own top edge, so the standalone
+ * logo render is fully removed here - never duplicated).
+ *
+ * Confirmed via the file's own raw PNG header (never assumed): 1536x1024, an
+ * exact 1.5:1 aspect ratio, RGBA with alpha - WIDTH is always derived from
+ * HEIGHT via SOCIAL_QUEST_PANEL_BACKGROUND_ASPECT_RATIO, never stretched.
+ *
+ * The art's own baked-in logo cluster occupies roughly its top third, with a
+ * cream rounded-rectangle "safe zone" below it (~34%-93% of the height,
+ * ~6%-93% of the width, confirmed by visually inspecting the asset) framed
+ * by hearts/sparkles/speech-bubble decoration in the corners. Those
+ * percentages are intrinsic to the artwork itself, not to whatever pixel
+ * size it's rendered at - they stay exactly the same for both tiers below,
+ * only the absolute pixel size (and therefore the absolute pixel size of the
+ * cream zone) changes.
+ *
+ * Two size tiers, reduced from the previous single-size pass per explicit QA
+ * feedback ("JOIN está usando un panel enorme para un solo botón"):
+ * - "Lobby" (JOIN/WAITING/PREPARING/AFK messages) - 780x520 WIDE, 660x440
+ *   COMPACT. Its own content (LOBBY_PANEL_HEIGHT=145 max) fits with huge
+ *   room to spare inside either tier's cream zone.
+ * - "Gameplay" (COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT) - 1200x800
+ *   WIDE, 960x640 COMPACT, down from 1380x920 - "quiero ganar algo más de
+ *   visión del mundo 3D". This shrinks the gameplay cream zone enough that
+ *   RESULT's own absolute worst case (REVEAL_MAX_NAMES_WIDE names on both
+ *   sides) now fits with only a few px to spare at WIDE - see the trimmed
+ *   GAMEPLAY_PANEL_PADDING/ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE/
+ *   ANSWERING_QUESTION_AREA_HEIGHT_WIDE and RESULTS' own margin-bottom
+ *   nearby, none of which touch ResultColumn itself.
+ */
+const SOCIAL_QUEST_PANEL_BACKGROUND_PATH = 'assets/images/social-quest-panel-background.png'
+const SOCIAL_QUEST_PANEL_BACKGROUND_ASPECT_RATIO = 1536 / 1024
+const SOCIAL_QUEST_PANEL_BACKGROUND_SAFE_AREA_TOP_PERCENT = '34%'
+const SOCIAL_QUEST_PANEL_BACKGROUND_SAFE_AREA_HEIGHT_PERCENT = '59%'
+const SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_WIDE = 800
+const SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_COMPACT = 640
+const SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_WIDE = 520
+const SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_COMPACT = 440
+
+/** `showingGameplayPanel` - true ONLY for COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT (see this constant block's own doc comment); false (the "lobby" tier) for JOIN/WAITING/PREPARING/AFK messages. */
+function getSocialQuestPanelBackgroundSize(showingGameplayPanel: boolean, compact: boolean): { width: number; height: number } {
+    const height = showingGameplayPanel
+        ? compact
+            ? SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_COMPACT
+            : SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_WIDE
+        : compact
+          ? SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_COMPACT
+          : SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_WIDE
+    return { width: height * SOCIAL_QUEST_PANEL_BACKGROUND_ASPECT_RATIO, height }
+}
 
 /** WAITING's own text - fixed, unconditional values now (no wide/compact tiering): the same compact sizing applies on every platform. */
 const WAITING_TEXT_FONT_SIZE = 22
@@ -581,21 +778,35 @@ const COUNTDOWN_NUMBER_FONT_SIZE = 72
 
 /**
  * The one shared outer panel for ANSWERING, ANSWER LOCKED, and RESULT (see
- * uiMenu's isGameplayPanelPhase gate) - same width/padding/position/title on
+ * uiMenu's showingGameplayPanel gate) - same width/padding/position/title on
  * every platform and across all three phases, with a FIXED height (not
  * auto) so the panel never resizes across that phase transition: ANSWER
  * LOCKED's shorter content just leaves blank space at the bottom instead of
  * shrinking the panel, and RESULT's cards have guaranteed room without ever
  * having driven the panel's size themselves. The height only tiers by
  * `compact` (isMobile() || !wide), same signal as everywhere else in this
- * file - GAMEPLAY_PANEL_HEIGHT_WIDE is sized to comfortably fit RESULT's own
- * worst case (REVEAL_MAX_NAMES_WIDE names + the "+N MORE" overflow row),
- * since RESULT's card content itself is unchanged and must always fit.
+ * file.
+ *
+ * HEIGHT_WIDE/COMPACT (540/430 -> 470/375) and PADDING (36 -> 24) both
+ * trimmed to fit inside the smaller "gameplay" panel-background cream zone
+ * introduced for that asset ("quiero ganar algo más de visión del mundo 3D"
+ * - see SOCIAL_QUEST_PANEL_BACKGROUND_*'s own doc comment): the panel's own
+ * declared height always renders in full regardless of which phase is
+ * showing (that's the whole point of a fixed, non-auto height), so it has to
+ * fit inside the new, smaller cream zone on its own - not just whatever
+ * content happens to be visible. At WIDE, this new height - together with
+ * the trimmed GAMEPLAY_PANEL_PADDING, ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE,
+ * ANSWERING_QUESTION_AREA_HEIGHT_WIDE, and RESULTS' own margin-bottom - is
+ * what makes RESULT's absolute worst case (REVEAL_MAX_NAMES_WIDE names on
+ * both sides) fit again, calculated to leave only a couple of px of real
+ * margin (a genuine trade-off of the smaller panel, not pixel-perfect -
+ * recommend a live check of that specific 5-vs-5 case). COMPACT keeps
+ * comfortable slack. None of ResultColumn's own sizing was touched.
  */
 const GAMEPLAY_PANEL_WIDTH = 760
-const GAMEPLAY_PANEL_PADDING = 36
-const GAMEPLAY_PANEL_HEIGHT_WIDE = 540
-const GAMEPLAY_PANEL_HEIGHT_COMPACT = 430
+const GAMEPLAY_PANEL_PADDING = 24
+const GAMEPLAY_PANEL_HEIGHT_WIDE = 470
+const GAMEPLAY_PANEL_HEIGHT_COMPACT = 375
 
 /**
  * ANSWERING's own content sizing tiers by `compact` (isMobile() || !wide),
@@ -605,7 +816,8 @@ const GAMEPLAY_PANEL_HEIGHT_COMPACT = 430
  */
 const ANSWERING_QUESTION_FONT_SIZE_WIDE = 32
 const ANSWERING_QUESTION_FONT_SIZE_COMPACT = 24
-const ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE = 28
+/** WIDE trimmed 28 -> 14 to help RESULT's worst case fit the smaller gameplay panel (see GAMEPLAY_PANEL_HEIGHT_WIDE's own doc comment) - still a real, deliberate gap, just tighter than before. COMPACT untouched (already had comfortable slack). */
+const ANSWERING_QUESTION_MARGIN_BOTTOM_WIDE = 14
 const ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT = 14
 /**
  * Reserved, fixed height for the question itself - same root cause and same
@@ -619,8 +831,13 @@ const ANSWERING_QUESTION_MARGIN_BOTTOM_COMPACT = 14
  * question renders as 1 or 2 lines - a real reserved zone, not a guess. The
  * question Label is vertically centered inside this box, so a short 1-line
  * question still reads centered rather than pinned to the top.
+ *
+ * WIDE trimmed slightly (88 -> 84) to help fit the smaller gameplay panel -
+ * still comfortably above the 2-line minimum (2 * 32px font * ~1.3 line-
+ * height ratio = 83.2px), so the "always fits 2 lines" guarantee this exists
+ * for is preserved, just with less spare cushion than before.
  */
-const ANSWERING_QUESTION_AREA_HEIGHT_WIDE = 88
+const ANSWERING_QUESTION_AREA_HEIGHT_WIDE = 84
 const ANSWERING_QUESTION_AREA_HEIGHT_COMPACT = 66
 const ANSWERING_TIMER_FONT_SIZE_WIDE = 24
 const ANSWERING_TIMER_FONT_SIZE_COMPACT = 16
@@ -635,23 +852,40 @@ const ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_COMPACT = 8
  * Answer buttons side by side on every platform. Sized generously up front
  * (not left to auto-measure) for the same reason documented on the reveal
  * name-list fix: a wrapped Label's measured height isn't reliably fed back
- * into this SDK's flex layout. COMPACT keeps the exact values already
- * validated against a real mobile device in production; WIDE keeps its
- * original desktop size.
+ * into this SDK's flex layout.
+ *
+ * Code-only visual test (no new PNGs): rounded cream/pink "cute" cards
+ * replacing the default red Button rectangles. COMPACT height in particular
+ * dropped a lot (120 -> 82) since the pill-shaped card needs less vertical
+ * room than the old rectangle to feel proportionate - freeing vertical
+ * budget rather than spending more of it, so this stays within the already
+ * tight GAMEPLAY_PANEL_HEIGHT_* fit documented above.
  */
-const ANSWER_BUTTON_WIDTH_WIDE = 260
-const ANSWER_BUTTON_HEIGHT_WIDE = 100
+const ANSWER_BUTTON_WIDTH_WIDE = 285
+const ANSWER_BUTTON_HEIGHT_WIDE = 92
 const ANSWER_BUTTON_GAP_WIDE = 16
-const ANSWER_BUTTON_WIDTH_COMPACT = 200
-const ANSWER_BUTTON_HEIGHT_COMPACT = 120
+const ANSWER_BUTTON_WIDTH_COMPACT = 225
+const ANSWER_BUTTON_HEIGHT_COMPACT = 82
 const ANSWER_BUTTON_GAP_COMPACT = 10
+const ANSWER_BUTTON_BORDER_RADIUS_WIDE = 28
+const ANSWER_BUTTON_BORDER_RADIUS_COMPACT = 24
+const ANSWER_BUTTON_BORDER_WIDTH = 2
+const ANSWER_BUTTON_BORDER_WIDTH_HOVER = 3
+const ANSWER_BUTTON_PADDING_HORIZONTAL = 12
+/** Multiplies the cream/pink/magenta channels of the non-chosen button once locked - de-emphasis via opacity/desaturation only, deliberately never a color swap (no green/red - there is no correct answer in Social Quest). */
+const ANSWER_BUTTON_UNSELECTED_DIM_FACTOR = 0.45
 
-/** Dynamic font-size steps by option text length, now applied on BOTH tiers (previously compact-only) - a long option can't overflow its button on desktop either. */
-const ANSWER_FONT_SIZE_SHORT_WIDE = 30
-const ANSWER_FONT_SIZE_MEDIUM_WIDE = 24
-const ANSWER_FONT_SIZE_LONG_WIDE = 18
-const ANSWER_FONT_SIZE_SHORT_COMPACT = 20
-const ANSWER_FONT_SIZE_MEDIUM_COMPACT = 17
+/**
+ * Dynamic font-size steps by option text length, retuned smaller for the new
+ * card shape's tighter COMPACT height. SHORT/MEDIUM bumped +1px per visual
+ * QA feedback (legibility) - LONG deliberately left untouched, since it's
+ * the tier that has to stay safely within the 2-line wrap budget.
+ */
+const ANSWER_FONT_SIZE_SHORT_WIDE = 20
+const ANSWER_FONT_SIZE_MEDIUM_WIDE = 19
+const ANSWER_FONT_SIZE_LONG_WIDE = 17
+const ANSWER_FONT_SIZE_SHORT_COMPACT = 17
+const ANSWER_FONT_SIZE_MEDIUM_COMPACT = 16
 const ANSWER_FONT_SIZE_LONG_COMPACT = 14
 const ANSWER_SHORT_MAX_CHARS = 16
 const ANSWER_MEDIUM_MAX_CHARS = 28
@@ -660,6 +894,162 @@ function answerFontSize(text: string, compact: boolean): number {
     if (text.length <= ANSWER_SHORT_MAX_CHARS) return compact ? ANSWER_FONT_SIZE_SHORT_COMPACT : ANSWER_FONT_SIZE_SHORT_WIDE
     if (text.length <= ANSWER_MEDIUM_MAX_CHARS) return compact ? ANSWER_FONT_SIZE_MEDIUM_COMPACT : ANSWER_FONT_SIZE_MEDIUM_WIDE
     return compact ? ANSWER_FONT_SIZE_LONG_COMPACT : ANSWER_FONT_SIZE_LONG_WIDE
+}
+
+/**
+ * One ANSWERING option button - rounded cream card, no A/B markers or icons,
+ * equal visual weight on both sides. `state` drives the palette:
+ *   - 'interactive': pre-lock, cream/pink/magenta by default, pink border
+ *     turns teal (and slightly thicker) on hover.
+ *   - 'selected': the option the player locked in - solid pink fill, cream
+ *     text, no hover reaction (nothing left to interact with).
+ *   - 'unselected': the other option once locked - same interactive look,
+ *     just dimmed via ANSWER_BUTTON_UNSELECTED_DIM_FACTOR (opacity only,
+ *     never a color swap - no green/red, there is no correct answer here).
+ * `hovered` is read-only here; the caller owns and resets the flag (see
+ * answerOptionAHovered/answerOptionBHovered's own doc comment).
+ */
+const AnswerOptionButton = ({
+    text,
+    fontSize,
+    compact,
+    state,
+    hovered,
+    margin,
+    onMouseDown,
+    onMouseEnter,
+    onMouseLeave
+}: {
+    text: string
+    fontSize: number
+    compact: boolean
+    state: 'interactive' | 'selected' | 'unselected'
+    hovered: boolean
+    margin: { left?: number; right?: number }
+    onMouseDown?: () => void
+    onMouseEnter?: () => void
+    onMouseLeave?: () => void
+}) => {
+    const dim = state === 'unselected' ? ANSWER_BUTTON_UNSELECTED_DIM_FACTOR : 1
+    const showHover = hovered && state === 'interactive'
+    const background =
+        state === 'selected'
+            ? AGENDA_BADGE_BACKGROUND
+            : Color4.create(AGENDA_CREAM.r, AGENDA_CREAM.g, AGENDA_CREAM.b, AGENDA_CREAM.a * dim)
+    const borderColor =
+        state === 'selected'
+            ? AGENDA_BADGE_BACKGROUND
+            : showHover
+              ? Color4.create(AGENDA_TEAL.r, AGENDA_TEAL.g, AGENDA_TEAL.b, AGENDA_TEAL.a * dim)
+              : Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, AGENDA_PINK.a * dim)
+    const textColor =
+        state === 'selected'
+            ? AGENDA_CREAM
+            : Color4.create(
+                  AGENDA_BADGE_BACKGROUND.r,
+                  AGENDA_BADGE_BACKGROUND.g,
+                  AGENDA_BADGE_BACKGROUND.b,
+                  AGENDA_BADGE_BACKGROUND.a * dim
+              )
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width: compact ? ANSWER_BUTTON_WIDTH_COMPACT : ANSWER_BUTTON_WIDTH_WIDE,
+                height: compact ? ANSWER_BUTTON_HEIGHT_COMPACT : ANSWER_BUTTON_HEIGHT_WIDE,
+                margin,
+                padding: { left: ANSWER_BUTTON_PADDING_HORIZONTAL, right: ANSWER_BUTTON_PADDING_HORIZONTAL },
+                borderRadius: compact ? ANSWER_BUTTON_BORDER_RADIUS_COMPACT : ANSWER_BUTTON_BORDER_RADIUS_WIDE,
+                borderWidth: showHover ? ANSWER_BUTTON_BORDER_WIDTH_HOVER : ANSWER_BUTTON_BORDER_WIDTH,
+                borderColor,
+                justifyContent: 'center',
+                alignItems: 'center'
+            }}
+            uiBackground={{ color: background }}
+            onMouseEnter={onMouseEnter}
+            onMouseLeave={onMouseLeave}
+            onMouseDown={onMouseDown}
+        >
+            {/* height:'100%' (not left auto) is deliberate - same fix as the reserved-zone
+                pattern used throughout this file (see ANSWER_BUTTON_PADDING_HORIZONTAL's
+                sibling constants' area / REVEAL_TITLE_AREA_HEIGHT_*'s doc comment): a
+                wrap-enabled Label's own measured height isn't reliably fed back into this
+                SDK's flex layout, so textAlign="middle-center" was centering within an
+                unreliable auto box and the text visually sat low. Giving it the button's
+                own exact, known height makes the centering deterministic. */}
+            <Label
+                value={text}
+                fontSize={fontSize}
+                textAlign="middle-center"
+                textWrap="wrap"
+                color={textColor}
+                uiTransform={{ width: '100%', height: '100%' }}
+            />
+        </UiEntity>
+    )
+}
+
+const JOIN_BUTTON_WIDTH_WIDE = 265
+const JOIN_BUTTON_HEIGHT_WIDE = 76
+const JOIN_BUTTON_WIDTH_COMPACT = 225
+const JOIN_BUTTON_HEIGHT_COMPACT = 70
+const JOIN_BUTTON_BORDER_RADIUS_WIDE = 30
+const JOIN_BUTTON_BORDER_RADIUS_COMPACT = 26
+const JOIN_BUTTON_BORDER_WIDTH = 3
+const JOIN_BUTTON_BORDER_WIDTH_HOVER = 4
+const JOIN_BUTTON_FONT_SIZE_WIDE = 19
+const JOIN_BUTTON_FONT_SIZE_COMPACT = 16
+
+/**
+ * JOIN button - same cream/pink/magenta card language as the answer buttons,
+ * but with a more marked border (JOIN_BUTTON_BORDER_WIDTH > ANSWER_BUTTON_
+ * BORDER_WIDTH) since it's the lobby's single call-to-action rather than one
+ * of two equal options. No new PNG - code-only, per the visual test scope.
+ */
+const JoinButton = ({
+    label,
+    fontSize,
+    width,
+    height,
+    borderRadius
+}: {
+    label: string
+    fontSize: number
+    width: number
+    height: number
+    borderRadius: number
+}) => {
+    const borderColor = joinButtonHovered ? AGENDA_TEAL : AGENDA_PINK
+    const borderWidth = joinButtonHovered ? JOIN_BUTTON_BORDER_WIDTH_HOVER : JOIN_BUTTON_BORDER_WIDTH
+
+    return (
+        <UiEntity
+            uiTransform={{
+                width,
+                height,
+                borderRadius,
+                borderWidth,
+                borderColor,
+                justifyContent: 'center',
+                alignItems: 'center',
+                padding: { left: 16, right: 16 }
+            }}
+            uiBackground={{ color: AGENDA_CREAM }}
+            onMouseEnter={() => (joinButtonHovered = true)}
+            onMouseLeave={() => (joinButtonHovered = false)}
+            onMouseDown={() => playerSessionManager.joinSocialQuest()}
+        >
+            {/* height:'100%' for the same reason as AnswerOptionButton's own Label - see its comment. */}
+            <Label
+                value={label}
+                fontSize={fontSize}
+                textAlign="middle-center"
+                textWrap="wrap"
+                color={AGENDA_BADGE_BACKGROUND}
+                uiTransform={{ width: '100%', height: '100%' }}
+            />
+        </UiEntity>
+    )
 }
 
 /**
@@ -693,18 +1083,22 @@ export const uiMenu = () => {
      * always false there) still reduces to exactly `!wide`.
      */
     const compact = isMobile() || !wide
-    /** WAITING is the one phase whose outer panel is always the small/compact size, on every platform - see WAITING_PANEL_* constants' doc comment. */
-    const isWaitingPhase = round.phase === 'waiting'
     /**
-     * COUNTDOWN/ANSWERING/ANSWER LOCKED/RESULT - the phases that share the fixed
-     * GAMEPLAY_PANEL_HEIGHT_* shell (see its doc comment). COUNTDOWN included so the
-     * panel doesn't resize/flicker right before the question it leads straight into.
-     * Requires session.joined: a round already in progress while this player hasn't
-     * joined yet renders JoinScreen (via `round.phase !== 'waiting'`, its own
-     * "JOIN NEXT ROUND" case), not JoinedGameplay - that JOIN screen keeps its
-     * own separate, untouched sizing regardless of round.phase.
+     * COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT - the phases that
+     * share the fixed GAMEPLAY_PANEL_HEIGHT_* shell AND the bigger
+     * "gameplay" panel-background tier (see its own doc comment). COUNTDOWN
+     * included so the panel doesn't resize/flicker right before the question
+     * it leads straight into. Requires session.joined (a round already in
+     * progress while this player hasn't joined yet renders JoinScreen, not
+     * JoinedGameplay) AND no active AFK message (REMOVED/STILL THERE take
+     * over the screen regardless of round.phase, and belong with the
+     * "lobby" tier instead, alongside JOIN/WAITING/PREPARING). Everything
+     * else in this file that used to branch on the old `isWaitingPhase` now
+     * branches on `!showingGameplayPanel` instead - a single "lobby vs
+     * gameplay" split replacing the previous phase-based one.
      */
-    const isGameplayPanelPhase = session.joined && (round.phase === 'countdown' || round.phase === 'answering' || round.phase === 'result')
+    const showingGameplayPanel =
+        session.joined && round.afkMessage === null && (round.phase === 'countdown' || round.phase === 'answering' || round.phase === 'result')
     /** Mirrors the exact condition JoinScreen renders under, below - used only to add JOIN_EXTRA_TOP_MARGIN to the panel for that one screen. */
     const showingJoinScreen =
         session.inZone && !session.joined && session.isSafeToJoin && round.afkMessage !== 'removed' && round.afkMessage !== 'warning'
@@ -784,6 +1178,7 @@ export const uiMenu = () => {
         }
     }
     const activeSocialPointsReward = getActiveSocialPointsReward()
+    const socialQuestPanelBackgroundSize = getSocialQuestPanelBackgroundSize(showingGameplayPanel, compact)
 
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
@@ -885,55 +1280,86 @@ export const uiMenu = () => {
                 {session.inZone && !socialAgendaOpen && !isLeaderboardOpen() && (
                     <UiEntity
                         uiTransform={{
-                            width: isWaitingPhase ? WAITING_PANEL_WIDTH : GAMEPLAY_PANEL_WIDTH,
-                            height: isGameplayPanelPhase ? (compact ? GAMEPLAY_PANEL_HEIGHT_COMPACT : GAMEPLAY_PANEL_HEIGHT_WIDE) : undefined,
-                            padding: isWaitingPhase ? WAITING_PANEL_PADDING : GAMEPLAY_PANEL_PADDING,
+                            width: socialQuestPanelBackgroundSize.width,
+                            height: socialQuestPanelBackgroundSize.height,
                             margin: { top: showingJoinScreen ? JOIN_EXTRA_TOP_MARGIN : 0 },
-                            flexDirection: 'column',
+                            justifyContent: 'center',
                             alignItems: 'center'
                         }}
-                        uiBackground={{ color: Color4.create(0.05, 0.05, 0.1, 0.85) }}
+                        uiBackground={{ texture: { src: SOCIAL_QUEST_PANEL_BACKGROUND_PATH }, textureMode: 'stretch' }}
                     >
-                        <Label
-                            value="SOCIAL QUEST"
-                            fontSize={isWaitingPhase ? WAITING_TITLE_FONT_SIZE : 56}
-                            color={Color4.create(1, 0.85, 0.2, 1)}
-                            uiTransform={{ margin: { bottom: isWaitingPhase ? WAITING_TITLE_MARGIN_BOTTOM : 18 } }}
-                        />
-
-                        {round.afkMessage === 'removed' ? (
-                            <UiEntity uiTransform={COLUMN_CENTERED}>
-                                <Label
-                                    value="REMOVED FOR INACTIVITY"
-                                    fontSize={30}
-                                    color={Color4.create(1, 0.5, 0.4, 1)}
-                                    uiTransform={{ margin: { bottom: 12 } }}
-                                />
-                                <Label value="You missed 2 questions." fontSize={22} color={MUTED} />
+                        {/* Safe area: a horizontal band inside the background's own cream zone (see
+                            SOCIAL_QUEST_PANEL_BACKGROUND_*'s own doc comment for the exact
+                            percentages) - spans the FULL outer width so the unchanged, narrower
+                            content panel below just centers itself well inside the cream zone's own
+                            (much wider) horizontal room, with no need for a separate left/width
+                            percentage - the background's own size was already chosen specifically so
+                            this fits. */}
+                        <UiEntity
+                            uiTransform={{
+                                positionType: 'absolute',
+                                position: { top: SOCIAL_QUEST_PANEL_BACKGROUND_SAFE_AREA_TOP_PERCENT },
+                                width: '100%',
+                                height: SOCIAL_QUEST_PANEL_BACKGROUND_SAFE_AREA_HEIGHT_PERCENT,
+                                justifyContent: 'center',
+                                alignItems: 'center'
+                            }}
+                        >
+                            {/* The actual content panel - width/height/padding UNCHANGED from
+                                before (still GAMEPLAY_PANEL_* / WAITING_PANEL_*), no uiBackground of
+                                its own anymore (the new asset behind it already provides the visual) -
+                                every child inside (AFK messages, JoinScreen, JoinedGameplay - question
+                                layout, answer buttons, RESULT columns/badges/animation) is completely
+                                untouched. */}
+                            <UiEntity
+                                uiTransform={{
+                                    width: showingGameplayPanel ? GAMEPLAY_PANEL_WIDTH : WAITING_PANEL_WIDTH,
+                                    height: showingGameplayPanel ? (compact ? GAMEPLAY_PANEL_HEIGHT_COMPACT : GAMEPLAY_PANEL_HEIGHT_WIDE) : LOBBY_PANEL_HEIGHT,
+                                    padding: showingGameplayPanel ? GAMEPLAY_PANEL_PADDING : WAITING_PANEL_PADDING,
+                                    flexDirection: 'column',
+                                    // Lobby only: centers JOIN/WAITING/PREPARING/AFK content vertically
+                                    // within the now-fixed LOBBY_PANEL_HEIGHT (see its own doc comment
+                                    // for why fixed, not auto). Gameplay keeps its existing top-down flow
+                                    // (title -> question -> timer/buttons or RESULT), untouched.
+                                    justifyContent: showingGameplayPanel ? 'flex-start' : 'center',
+                                    alignItems: 'center'
+                                }}
+                            >
+                                {round.afkMessage === 'removed' ? (
+                                    <UiEntity uiTransform={COLUMN_CENTERED}>
+                                        <Label
+                                            value="REMOVED FOR INACTIVITY"
+                                            fontSize={30}
+                                            color={Color4.create(1, 0.5, 0.4, 1)}
+                                            uiTransform={{ margin: { bottom: 12 } }}
+                                        />
+                                        <Label value="You missed 2 questions." fontSize={22} color={CREAM_PANEL_TEXT_MUTED} />
+                                    </UiEntity>
+                                ) : round.afkMessage === 'warning' ? (
+                                    <UiEntity uiTransform={COLUMN_CENTERED}>
+                                        <Label
+                                            value="STILL THERE?"
+                                            fontSize={30}
+                                            color={AGENDA_BADGE_BACKGROUND}
+                                            uiTransform={{ margin: { bottom: 12 } }}
+                                        />
+                                        <Label
+                                            value="Answer the next question to stay in Social Quest."
+                                            fontSize={20}
+                                            textAlign="middle-center"
+                                            textWrap="wrap"
+                                            color={CREAM_PANEL_TEXT_MUTED}
+                                        />
+                                    </UiEntity>
+                                ) : !session.isSafeToJoin ? (
+                                    <Label value="PREPARING SOCIAL QUEST..." fontSize={32} color={AGENDA_BADGE_BACKGROUND} />
+                                ) : !session.joined ? (
+                                    <JoinScreen />
+                                ) : (
+                                    <JoinedGameplay />
+                                )}
                             </UiEntity>
-                        ) : round.afkMessage === 'warning' ? (
-                            <UiEntity uiTransform={COLUMN_CENTERED}>
-                                <Label
-                                    value="STILL THERE?"
-                                    fontSize={30}
-                                    color={Color4.create(1, 0.85, 0.2, 1)}
-                                    uiTransform={{ margin: { bottom: 12 } }}
-                                />
-                                <Label
-                                    value="Answer the next question to stay in Social Quest."
-                                    fontSize={20}
-                                    textAlign="middle-center"
-                                    textWrap="wrap"
-                                    color={MUTED}
-                                />
-                            </UiEntity>
-                        ) : !session.isSafeToJoin ? (
-                            <Label value="PREPARING SOCIAL QUEST..." fontSize={32} color={MUTED} />
-                        ) : !session.joined ? (
-                            <JoinScreen />
-                        ) : (
-                            <JoinedGameplay />
-                        )}
+                        </UiEntity>
                     </UiEntity>
                 )}
             </UiEntity>
@@ -964,6 +1390,9 @@ export const uiMenu = () => {
 const JoinScreen = () => {
     const round = roundManager.getSnapshot()
     const roundAlreadyActive = !round.isSyncing && round.phase !== 'waiting'
+    const wide = getUiScale() >= WIDE_MIN_SCALE
+    // Same isMobile()-OR'd signal as uiMenu's own `compact` - see its doc comment.
+    const compact = isMobile() || !wide
 
     return (
         <UiEntity uiTransform={COLUMN_CENTERED}>
@@ -971,16 +1400,16 @@ const JoinScreen = () => {
                 <Label
                     value={`${round.activeParticipantCount} PLAYERS ACTIVE`}
                     fontSize={24}
-                    color={MUTED}
+                    color={CREAM_PANEL_TEXT_MUTED}
                     uiTransform={{ margin: { bottom: 16 } }}
                 />
             )}
-            <Button
-                value={roundAlreadyActive ? 'JOIN NEXT ROUND' : 'JOIN SOCIAL QUEST'}
-                variant="primary"
-                fontSize={28}
-                uiTransform={{ width: 320, height: 90 }}
-                onMouseDown={() => playerSessionManager.joinSocialQuest()}
+            <JoinButton
+                label={roundAlreadyActive ? 'JOIN NEXT ROUND' : 'JOIN SOCIAL QUEST'}
+                fontSize={compact ? JOIN_BUTTON_FONT_SIZE_COMPACT : JOIN_BUTTON_FONT_SIZE_WIDE}
+                width={compact ? JOIN_BUTTON_WIDTH_COMPACT : JOIN_BUTTON_WIDTH_WIDE}
+                height={compact ? JOIN_BUTTON_HEIGHT_COMPACT : JOIN_BUTTON_HEIGHT_WIDE}
+                borderRadius={compact ? JOIN_BUTTON_BORDER_RADIUS_COMPACT : JOIN_BUTTON_BORDER_RADIUS_WIDE}
             />
         </UiEntity>
     )
@@ -994,6 +1423,15 @@ const JoinedGameplay = () => {
     // Same isMobile()-OR'd signal as uiMenu's own `compact` - see its doc comment.
     const compact = isMobile() || !wide
 
+    // Reset button-hover flags whenever their owning buttons aren't the ones currently
+    // on screen - see answerOptionAHovered/joinButtonHovered's own doc comment for why
+    // this can't rely on onMouseLeave alone (mount/unmount across phases/rounds).
+    joinButtonHovered = false
+    if (phase !== 'answering' || selectedOption !== null) {
+        answerOptionAHovered = false
+        answerOptionBHovered = false
+    }
+
     if (isPending) {
         return (
             <UiEntity uiTransform={COLUMN_CENTERED}>
@@ -1002,7 +1440,7 @@ const JoinedGameplay = () => {
                     fontSize={32}
                     textAlign="middle-center"
                     textWrap="wrap"
-                    color={Color4.White()}
+                    color={AGENDA_BADGE_BACKGROUND}
                 />
             </UiEntity>
         )
@@ -1016,13 +1454,13 @@ const JoinedGameplay = () => {
                     fontSize={WAITING_TEXT_FONT_SIZE}
                     textAlign="middle-center"
                     textWrap="wrap"
-                    color={Color4.White()}
+                    color={AGENDA_BADGE_BACKGROUND}
                     uiTransform={{ width: '100%', margin: { bottom: WAITING_TEXT_MARGIN_BOTTOM } }}
                 />
                 <Label
                     value={`${activeParticipantCount} / ${MIN_PLAYERS_REQUIRED}`}
                     fontSize={WAITING_COUNT_FONT_SIZE}
-                    color={MUTED}
+                    color={CREAM_PANEL_TEXT_MUTED}
                 />
             </UiEntity>
         )
@@ -1036,7 +1474,7 @@ const JoinedGameplay = () => {
                     fontSize={COUNTDOWN_TITLE_FONT_SIZE}
                     textAlign="middle-center"
                     textWrap="wrap"
-                    color={Color4.White()}
+                    color={CREAM_PANEL_TEXT_MUTED}
                     uiTransform={{ width: '100%', margin: { bottom: COUNTDOWN_TITLE_MARGIN_BOTTOM } }}
                 />
                 <Label value={`${secondsLeft}`} fontSize={COUNTDOWN_NUMBER_FONT_SIZE} color={Color4.create(1, 0.85, 0.2, 1)} />
@@ -1046,8 +1484,6 @@ const JoinedGameplay = () => {
 
     // Guaranteed non-null by RoundManager whenever phase is 'answering' or 'result'
     const activeQuestion = question as NonNullable<typeof question>
-    const selectedLabel =
-        selectedOption === 'A' ? activeQuestion.optionA : selectedOption === 'B' ? activeQuestion.optionB : null
 
     return (
         <UiEntity uiTransform={COLUMN_CENTERED}>
@@ -1069,7 +1505,7 @@ const JoinedGameplay = () => {
                     fontSize={compact ? ANSWERING_QUESTION_FONT_SIZE_COMPACT : ANSWERING_QUESTION_FONT_SIZE_WIDE}
                     textAlign="middle-center"
                     textWrap="wrap"
-                    color={Color4.White()}
+                    color={AGENDA_BADGE_BACKGROUND}
                     uiTransform={{ width: '100%' }}
                 />
             </UiEntity>
@@ -1080,34 +1516,32 @@ const JoinedGameplay = () => {
                     <Label
                         value={`${secondsLeft}s`}
                         fontSize={compact ? ANSWERING_TIMER_FONT_SIZE_COMPACT : ANSWERING_TIMER_FONT_SIZE_WIDE}
-                        color={MUTED}
+                        color={AGENDA_TEAL}
                         uiTransform={{ margin: { bottom: compact ? ANSWERING_TIMER_MARGIN_BOTTOM_COMPACT : ANSWERING_TIMER_MARGIN_BOTTOM_WIDE } }}
                     />
 
                     {selectedOption === null ? (
                         <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
-                            <Button
-                                value={activeQuestion.optionA}
-                                variant="primary"
+                            <AnswerOptionButton
+                                text={activeQuestion.optionA}
                                 fontSize={answerFontSize(activeQuestion.optionA, compact)}
-                                textWrap="wrap"
-                                uiTransform={
-                                    compact
-                                        ? { width: ANSWER_BUTTON_WIDTH_COMPACT, height: ANSWER_BUTTON_HEIGHT_COMPACT, margin: { right: ANSWER_BUTTON_GAP_COMPACT } }
-                                        : { width: ANSWER_BUTTON_WIDTH_WIDE, height: ANSWER_BUTTON_HEIGHT_WIDE, margin: { right: ANSWER_BUTTON_GAP_WIDE } }
-                                }
+                                compact={compact}
+                                state="interactive"
+                                hovered={answerOptionAHovered}
+                                margin={compact ? { right: ANSWER_BUTTON_GAP_COMPACT } : { right: ANSWER_BUTTON_GAP_WIDE }}
+                                onMouseEnter={() => (answerOptionAHovered = true)}
+                                onMouseLeave={() => (answerOptionAHovered = false)}
                                 onMouseDown={() => roundManager.selectOption('A')}
                             />
-                            <Button
-                                value={activeQuestion.optionB}
-                                variant="primary"
+                            <AnswerOptionButton
+                                text={activeQuestion.optionB}
                                 fontSize={answerFontSize(activeQuestion.optionB, compact)}
-                                textWrap="wrap"
-                                uiTransform={
-                                    compact
-                                        ? { width: ANSWER_BUTTON_WIDTH_COMPACT, height: ANSWER_BUTTON_HEIGHT_COMPACT, margin: { left: ANSWER_BUTTON_GAP_COMPACT } }
-                                        : { width: ANSWER_BUTTON_WIDTH_WIDE, height: ANSWER_BUTTON_HEIGHT_WIDE, margin: { left: ANSWER_BUTTON_GAP_WIDE } }
-                                }
+                                compact={compact}
+                                state="interactive"
+                                hovered={answerOptionBHovered}
+                                margin={compact ? { left: ANSWER_BUTTON_GAP_COMPACT } : { left: ANSWER_BUTTON_GAP_WIDE }}
+                                onMouseEnter={() => (answerOptionBHovered = true)}
+                                onMouseLeave={() => (answerOptionBHovered = false)}
                                 onMouseDown={() => roundManager.selectOption('B')}
                             />
                         </UiEntity>
@@ -1116,24 +1550,34 @@ const JoinedGameplay = () => {
                             <Label
                                 value="ANSWER LOCKED"
                                 fontSize={compact ? ANSWERING_LOCKED_LABEL_FONT_SIZE_COMPACT : ANSWERING_LOCKED_LABEL_FONT_SIZE_WIDE}
-                                color={Color4.create(0.6, 1, 0.6, 1)}
+                                color={AGENDA_TEAL}
                                 uiTransform={{ margin: { bottom: compact ? ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_COMPACT : ANSWERING_LOCKED_LABEL_MARGIN_BOTTOM_WIDE } }}
                             />
-                            <Label
-                                value={selectedLabel as string}
-                                fontSize={answerFontSize(selectedLabel as string, compact)}
-                                textAlign="middle-center"
-                                textWrap="wrap"
-                                color={Color4.White()}
-                                uiTransform={{ width: '100%' }}
-                            />
+                            <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+                                <AnswerOptionButton
+                                    text={activeQuestion.optionA}
+                                    fontSize={answerFontSize(activeQuestion.optionA, compact)}
+                                    compact={compact}
+                                    state={selectedOption === 'A' ? 'selected' : 'unselected'}
+                                    hovered={false}
+                                    margin={compact ? { right: ANSWER_BUTTON_GAP_COMPACT } : { right: ANSWER_BUTTON_GAP_WIDE }}
+                                />
+                                <AnswerOptionButton
+                                    text={activeQuestion.optionB}
+                                    fontSize={answerFontSize(activeQuestion.optionB, compact)}
+                                    compact={compact}
+                                    state={selectedOption === 'B' ? 'selected' : 'unselected'}
+                                    hovered={false}
+                                    margin={compact ? { left: ANSWER_BUTTON_GAP_COMPACT } : { left: ANSWER_BUTTON_GAP_WIDE }}
+                                />
+                            </UiEntity>
                         </UiEntity>
                     )}
                 </UiEntity>
             ) : (
                 <UiEntity uiTransform={COLUMN_CENTERED}>
                     {isRevealing || !reveal ? (
-                        <Label value="REVEALING..." fontSize={32} color={MUTED} />
+                        <Label value="REVEALING..." fontSize={32} color={AGENDA_BADGE_BACKGROUND} />
                     ) : (
                         <RevealResults optionAText={activeQuestion.optionA} optionBText={activeQuestion.optionB} reveal={reveal} />
                     )}
@@ -1155,9 +1599,18 @@ const JoinedGameplay = () => {
  * the existing reveal rule that they're excluded from the A/B comparison - no
  * third column was added.
  */
-const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: string; optionBText: string; reveal: RevealData }) => {
+const RevealResults = ({
+    optionAText,
+    optionBText,
+    reveal
+}: {
+    optionAText: string
+    optionBText: string
+    reveal: RevealData
+}) => {
     const wide = getUiScale() >= WIDE_MIN_SCALE
     const maxNames = wide ? REVEAL_MAX_NAMES_WIDE : REVEAL_MAX_NAMES_COMPACT
+    const { opacity, scale } = getResultRevealPresentation()
 
     const entriesA = reveal.entries.filter((entry) => entry.option === 'A')
     const entriesB = reveal.entries.filter((entry) => entry.option === 'B')
@@ -1180,7 +1633,15 @@ const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: stri
 
     return (
         <UiEntity uiTransform={COLUMN_CENTERED}>
-            <Label value="RESULTS" fontSize={32} color={Color4.create(0.85, 0.75, 1, 1)} uiTransform={{ margin: { bottom: 16 } }} />
+            <Label
+                value="RESULTS"
+                fontSize={32}
+                color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
+                // Trimmed 16 -> 6 to help fit the smaller gameplay panel (see
+                // GAMEPLAY_PANEL_HEIGHT_WIDE's own doc comment) - still a real gap
+                // from the two ResultColumns below, just tighter than before.
+                uiTransform={{ margin: { bottom: 6 } }}
+            />
             <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center', alignItems: 'flex-start' }}>
                 <ResultColumn
                     label="A"
@@ -1191,6 +1652,8 @@ const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: stri
                     maxNames={maxNames}
                     nameListRows={requiredRows}
                     wide={wide}
+                    opacity={opacity}
+                    scale={scale}
                 />
                 <UiEntity uiTransform={{ width: wide ? 24 : 14 }} />
                 <ResultColumn
@@ -1202,6 +1665,8 @@ const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: stri
                     maxNames={maxNames}
                     nameListRows={requiredRows}
                     wide={wide}
+                    opacity={opacity}
+                    scale={scale}
                 />
             </UiEntity>
         </UiEntity>
@@ -1209,13 +1674,18 @@ const RevealResults = ({ optionAText, optionBText, reveal }: { optionAText: stri
 }
 
 /**
- * One RESULT option column. Both A and B use identical styling/weight - a shared
- * violet/lavender accent, no green/red, no "winner" treatment - per the "social
- * discovery, not competition" direction. Names are `entry.name`, resolved exactly
- * as before by roundManager's own buildRevealData() (unchanged) - not the
- * separate getDisplayNameFor/Questmate cache the HUD/Agenda/celebrations use,
- * since reveal names were already resolving correctly before this task and this
- * is presentation-only.
+ * One RESULT option column. Both A and B use identical styling/weight - the
+ * shared Social Quest palette (cream/pink/teal/magenta), no green/red, no
+ * "winner" treatment - per the "social discovery, not competition" direction.
+ * A dedicated per-column "YOUR CHOICE" callout/border accent existed briefly
+ * but was retired: the "YOU" badge on the local player's own name row (see
+ * the name-list rendering below) already communicates exactly which option
+ * they picked, without needing to mark the whole column too. Names are
+ * `entry.name`, resolved exactly as before by roundManager's own
+ * buildRevealData() (unchanged) - not the separate getDisplayNameFor/
+ * Questmate cache the HUD/Agenda/celebrations use, since reveal names were
+ * already resolving correctly before this task and this is
+ * presentation-only.
  */
 const ResultColumn = ({
     label,
@@ -1225,7 +1695,9 @@ const ResultColumn = ({
     entries,
     maxNames,
     nameListRows,
-    wide
+    wide,
+    opacity,
+    scale
 }: {
     label: 'A' | 'B'
     optionText: string
@@ -1236,6 +1708,8 @@ const ResultColumn = ({
     /** Shared row budget from RevealResults (the larger of what either A or B needs) - both columns reserve this same amount of name-list height, so neither card's size depends on its own content alone. */
     nameListRows: number
     wide: boolean
+    opacity: number
+    scale: number
 }) => {
     const shown = entries.slice(0, maxNames)
     const remaining = entries.length - shown.length
@@ -1246,15 +1720,15 @@ const ResultColumn = ({
     return (
         <UiEntity
             uiTransform={{
-                width: wide ? 320 : 220,
+                width: (wide ? 320 : 220) * scale,
                 flexDirection: 'column',
                 alignItems: 'flex-start',
                 padding: wide ? 18 : 12,
-                borderColor: Color4.create(0.6, 0.45, 0.85, 1),
-                borderWidth: 1,
-                borderRadius: 10
+                borderColor: Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, opacity),
+                borderWidth: REVEAL_COLUMN_BORDER_WIDTH,
+                borderRadius: REVEAL_COLUMN_BORDER_RADIUS
             }}
-            uiBackground={{ color: Color4.create(0.16, 0.09, 0.22, 0.85) }}
+            uiBackground={{ color: Color4.create(REVEAL_COLUMN_BACKGROUND.r, REVEAL_COLUMN_BACKGROUND.g, REVEAL_COLUMN_BACKGROUND.b, REVEAL_COLUMN_BACKGROUND.a * opacity) }}
         >
             {/* Option title: its own explicit-height wrapper, same reliable technique as the
                 name-list fix - the wrapped Label's own measured height isn't trusted, so the
@@ -1269,9 +1743,9 @@ const ResultColumn = ({
                 }}
             >
                 <Label
-                    value={`${label} — ${optionText}`}
+                    value={optionText}
                     fontSize={wide ? REVEAL_TITLE_FONT_SIZE_WIDE : REVEAL_TITLE_FONT_SIZE_COMPACT}
-                    color={Color4.create(0.85, 0.75, 1, 1)}
+                    color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
                     textWrap="wrap"
                     uiTransform={{ width: '100%' }}
                 />
@@ -1286,7 +1760,11 @@ const ResultColumn = ({
                     margin: { bottom: 12 }
                 }}
             >
-                <Label value={`${count} PLAYER${count === 1 ? '' : 'S'} · ${percent}%`} fontSize={wide ? 16 : 13} color={MUTED} />
+                <Label
+                    value={`${count} PLAYER${count === 1 ? '' : 'S'} · ${percent}%`}
+                    fontSize={wide ? 16 : 13}
+                    color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
+                />
             </UiEntity>
             {/* Each name gets its own row container with an EXPLICIT height - the previous bare,
                 wrap-enabled Labels stacked directly in this flex column didn't reliably report
@@ -1306,18 +1784,49 @@ const ResultColumn = ({
             <UiEntity uiTransform={{ width: '100%', height: nameListHeight, flexDirection: 'column' }}>
                 {shown.map((entry, index) => {
                     const isLastRow = remaining === 0 && index === shown.length - 1
+                    const isLocalPlayer = entry.userId === myProfile.userId
                     return (
                         <UiEntity
                             key={entry.userId}
-                            uiTransform={{ width: '100%', height: rowHeight, alignItems: 'center', margin: { bottom: isLastRow ? 0 : REVEAL_NAME_ROW_GAP } }}
+                            uiTransform={{
+                                width: '100%',
+                                height: rowHeight,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                margin: { bottom: isLastRow ? 0 : REVEAL_NAME_ROW_GAP }
+                            }}
                         >
-                            <Label value={entry.name} fontSize={wide ? 18 : 14} color={Color4.White()} />
+                            <Label
+                                value={truncateResultName(entry.name, wide)}
+                                fontSize={wide ? 18 : 14}
+                                color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
+                            />
+                            {/* "YOU" badge - purely a comparison against myProfile.userId (already
+                                available locally, no new network call, no change to entry.name/
+                                buildRevealData) - "rápido de reconocer" per explicit instruction. */}
+                            {isLocalPlayer && (
+                                <UiEntity
+                                    uiTransform={{ margin: { left: 6 }, padding: { top: 2, bottom: 2, left: 6, right: 6 }, borderRadius: 6 }}
+                                    uiBackground={{ color: Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity) }}
+                                >
+                                    <Label
+                                        value="YOU"
+                                        fontSize={wide ? 11 : 9}
+                                        color={Color4.create(AGENDA_CREAM.r, AGENDA_CREAM.g, AGENDA_CREAM.b, opacity)}
+                                        textWrap="nowrap"
+                                    />
+                                </UiEntity>
+                            )}
                         </UiEntity>
                     )
                 })}
                 {remaining > 0 && (
                     <UiEntity uiTransform={{ width: '100%', height: rowHeight, alignItems: 'center' }}>
-                        <Label value={`+${remaining} MORE`} fontSize={wide ? 15 : 12} color={MUTED} />
+                        <Label
+                            value={`+${remaining} MORE`}
+                            fontSize={wide ? 15 : 12}
+                            color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
+                        />
                     </UiEntity>
                 )}
             </UiEntity>
