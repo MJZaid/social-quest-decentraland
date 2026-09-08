@@ -1066,9 +1066,19 @@ function getValidRoundAnswerers(roundId: number): string[] {
  * Scans the CURRENT round's live synced answers for Social Points - a flat
  * loop per PLAYER, deliberately not the pair loop scanCurrentRoundForValidPairs
  * uses (that function is untouched; this is a fully separate scan of the same
- * underlying data). A round only ever awards +1 validRound per player, and
- * only if at least 2 players answered validly this round - a single answerer
- * with nobody else responding gets nothing, matching the product rule exactly.
+ * underlying data).
+ *
+ * +1 validRound is an INDIVIDUAL PARTICIPATION reward: a player gets it the
+ * moment THEIR OWN answer for this round is A or B, regardless of what
+ * anyone else in the round did or didn't answer. Previously this required at
+ * least 2 valid answerers this round, which meant a player who answered
+ * validly could still get nothing if their only partner went AFK/NO_ANSWER -
+ * an explicit product decision to remove that penalty (see this change's own
+ * report for the full rationale/examples). This never touches
+ * scanCurrentRoundForValidPairs above, whose own pair-based Connections/
+ * Friendship logic still inherently requires two valid answerers (a "pair"
+ * can't exist with fewer) - a round with only one answerer still can never
+ * become a valid Connection/Friendship interaction, exactly as before.
  * Re-scanning an already-applied round is a cheap no-op via the same
  * eventId/dedupe discipline as Connections.
  */
@@ -1076,7 +1086,6 @@ function scanCurrentRoundForSocialPoints(state: RoundStateValue): void {
     if (state.phase !== SharedPhase.RESULT) return
 
     const validAnswerers = getValidRoundAnswerers(state.roundId)
-    if (validAnswerers.length < 2) return // needs at least 2 valid answerers this round to count for anyone
 
     for (const userId of validAnswerers) {
         // Resolved from the RAW (non-normalized) userId, before normalizeUserId -

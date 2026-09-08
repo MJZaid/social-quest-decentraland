@@ -137,35 +137,25 @@ function queueReward(reward: SocialPointsReward): void {
 
 // ---------------------------------------------------------------------------
 // +1 SP PER VALID ROUND - mirrors persistenceManager.ts's
-// scanCurrentRoundForSocialPoints/getValidRoundAnswerers EXACTLY: phase
-// RESULT, NO_ANSWER excluded, at least 2 valid answerers this round,
-// match/mismatch never inspected. Computed from getAnswersForRound() - the
-// same synced data connectionsManager.processRoundState() already reads, no
-// new network dependency.
+// scanCurrentRoundForSocialPoints EXACTLY: phase RESULT, NO_ANSWER excluded,
+// INDIVIDUAL PARTICIPATION only (my own answer being A/B is the sole
+// condition - what anyone else in the round answered, or didn't, never
+// factors in). Computed from getAnswersForRound() - the same synced data
+// connectionsManager.processRoundState() already reads, no new network
+// dependency.
 // ---------------------------------------------------------------------------
 
-/**
- * The last roundId a +1 SP reward was already queued for - a round is only
- * ever rewarded once, but a round whose valid-answerer count hasn't reached
- * 2 YET (a partner's answer still pending) is deliberately left unmarked so
- * a later RESULT tick (late arrival) can still reward it - mirrors the
- * server's own tolerance for re-scanning every RESULT tick.
- */
+/** The last roundId a +1 SP reward was already queued for - a round is only ever rewarded once. */
 let lastValidRoundRewardedRoundId: number | null = null
 
 function tickValidRoundReward(state: RoundStateValue): void {
     if (state.phase !== SharedPhase.RESULT) return
     if (state.roundId === lastValidRoundRewardedRoundId) return
 
-    const answers = getAnswersForRound(state.roundId)
-    const myAnswer = answers.find((answer) => answer.userId === myProfile.userId && answer.option !== AnswerOption.NO_ANSWER)
-    if (!myAnswer) return // I didn't answer validly this round - no Social Points for me, same as the server's own rule
-
-    const validAnswererIds = new Set<string>()
-    for (const answer of answers) {
-        if (answer.option !== AnswerOption.NO_ANSWER) validAnswererIds.add(answer.userId)
-    }
-    if (validAnswererIds.size < 2) return // not enough valid answerers yet this round - try again next tick (late arrival)
+    const myAnswer = getAnswersForRound(state.roundId).find(
+        (answer) => answer.userId === myProfile.userId && answer.option !== AnswerOption.NO_ANSWER
+    )
+    if (!myAnswer) return // I didn't answer validly this round - no Social Points for me, regardless of anyone else's answer
 
     lastValidRoundRewardedRoundId = state.roundId
     queueReward({ amount: 1, reason: 'VALID_ROUND' })
