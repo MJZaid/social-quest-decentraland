@@ -1279,7 +1279,8 @@ export const uiMenu = () => {
                     chosen. */}
                 <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
                     {presentedNewConnection && (
-                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
+                        // pointerFilter:'none' - purely informational, must never intercept clicks meant for the HUD buttons beneath/around it (same principle already proven on SocialPointsValidRoundToast).
+                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
                             <NewConnectionToast
                                 data={presentedNewConnection}
                                 presentation={getActiveCelebrationPresentation(presentedNewConnection)}
@@ -1288,7 +1289,8 @@ export const uiMenu = () => {
                         </UiEntity>
                     )}
                     {presentedFriendship && (
-                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP } }}>
+                        // pointerFilter:'none' - same reasoning as the NewConnectionToast wrapper above.
+                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
                             <FriendshipToast
                                 data={presentedFriendship}
                                 presentation={getActiveCelebrationPresentation(presentedFriendship)}
