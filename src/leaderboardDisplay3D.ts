@@ -1,4 +1,4 @@
-import { engine, Entity, Name, TextShape, TextAlignMode, Transform } from '@dcl/sdk/ecs'
+import { engine, Entity, Name, TextShape, TextAlignMode, Transform, MeshRenderer, Material, MaterialTransparencyMode } from '@dcl/sdk/ecs'
 import { Vector3, Quaternion, Color3, Color4 } from '@dcl/sdk/math'
 import { isStateSyncronized } from '@dcl/sdk/network'
 import { EntityNames } from '../assets/scene/entity-names'
@@ -72,49 +72,106 @@ const MATCH_LOADING_TEXT = 'LOADING...'
  * surfaces, no cross-file dependency" reasoning already established for
  * ui.tsx's own AGENDA_CREAM/AGENDA_PINK/AGENDA_TEAL. The old dominant yellow
  * is gone entirely from this file.
+ *
+ * Color/outline-only pass: brings this sign's palette the rest of the way in
+ * line with the illustrated 2D Leaderboard panel - GOLD is new here (same
+ * value as leaderboardUi.tsx's own GOLD, reused rather than invented),
+ * reserved strictly for #1's rank/SP and the ALL-TIME title, the same
+ * "controlled ranking accent, never a panel-wide fill" rule that file
+ * documents. MUTED_CREAM is also new: a warmer, lighter secondary tone for
+ * shared-answers/empty-state-subtext lines specifically, since this sign
+ * still sits on the SAME unrecolorable baked GLB background as before (only
+ * the 2D UI panels became cream - this sign did not), so text here still
+ * needs to stay on the light end for contrast, just distinguishable from the
+ * brighter CREAM used for names/titles.
  */
 const CREAM = Color4.create(0.97, 0.93, 0.86, 1)
 const SOCIAL_PINK = Color4.create(1, 0.75, 0.9, 1)
 const TEAL_ACCENT = Color4.create(0.4, 0.75, 1, 1)
-/** Same value as ui.tsx/leaderboardUi.tsx's own MUTED - used for shared-answers lines and the divider, the two least-prioritized elements on this sign (see the layout section's own priority order). */
+/** Same value as ui.tsx/leaderboardUi.tsx's own MUTED - kept only for DIVIDER_COLOR's own reasoning below (a faint decorative line, not text). Text that previously used this flat gray (shared answers, empty-state subtext) now uses the lighter MUTED_CREAM instead - see that constant's own doc comment. */
 const MUTED = Color4.create(0.7, 0.7, 0.75, 1)
+/** Same value as leaderboardUi.tsx's own GOLD - the controlled ranking/achievement accent, used ONLY for #1's rank+SP in TOP SOCIAL QUESTERS (no longer in any section title - see ALLTIME_TITLE_COLOR's own doc comment). Never a panel-wide fill. */
+const GOLD = Color4.create(0.8, 0.62, 0.22, 1)
+/** A warmer, lighter secondary tone than plain MUTED - blended toward CREAM specifically for the two lowest-priority text lines on this sign (shared-answers counts, empty-state subtext) per explicit "muted/cream" feedback; still clearly secondary next to CREAM-colored names/titles, but warmer and easier to read against the baked GLB background than the flatter gray MUTED. */
+const MUTED_CREAM = Color4.create(0.85, 0.81, 0.75, 1)
 
-const TITLE_COLOR = CREAM
+/** Changed from CREAM to TEAL_ACCENT - per explicit follow-up, all three section titles (this, WEEKLY_TITLE_COLOR, ALLTIME_TITLE_COLOR) now share the exact same color for visual uniformity across the sign. */
+const TITLE_COLOR = TEAL_ACCENT
+/** Non-#1 rank color (Social Points) - #1 uses GOLD instead, applied per-row at creation time (see ensureDisplayEntities' own spRows map). */
 const RANK_COLOR = TEAL_ACCENT
 const NAME_COLOR = CREAM
-const SP_COLOR = SOCIAL_PINK
-const MATCH_TITLE_COLOR = CREAM
+/** Non-#1 SP color (Social Points) - #1 uses GOLD instead, same per-row treatment as RANK_COLOR. Changed from the old SOCIAL_PINK to TEAL per explicit "SP: TEAL" instruction - pink is now reserved for the heart glyph and stays out of the numeric columns here, mirroring leaderboardUi.tsx's own LeaderboardRow (SP figure = TEAL, not pink). */
+const SP_COLOR = TEAL_ACCENT
+/** WEEKLY's own mini-title color - teal/mint. Unchanged this pass - it was already the reference value TITLE_COLOR/ALLTIME_TITLE_COLOR were both brought in line with, per explicit "usa como referencia... TOP MATCH THIS WEEK." */
+const WEEKLY_TITLE_COLOR = TEAL_ACCENT
+/** Changed from GOLD to TEAL_ACCENT - per explicit follow-up, ALL-TIME's own extra visual weight ("un poquito más de peso que Weekly," the reason GOLD was chosen originally) is retraded for uniformity across all three section titles instead. GOLD itself is untouched and still used for #1's rank+SP - it just no longer appears in any title. */
+const ALLTIME_TITLE_COLOR = TEAL_ACCENT
 const MATCH_NAME_COLOR = CREAM
 const MATCH_HEART_COLOR = SOCIAL_PINK
-const MATCH_AFFINITY_COLOR = SOCIAL_PINK
-const MATCH_SHARED_COLOR = MUTED
+/** Changed from SOCIAL_PINK to TEAL per explicit "affinity % teal" instruction, for both WEEKLY and ALL-TIME. */
+const MATCH_AFFINITY_COLOR = TEAL_ACCENT
+/** Changed from flat MUTED to the warmer MUTED_CREAM - see that constant's own doc comment. */
+const MATCH_SHARED_COLOR = MUTED_CREAM
 const MATCH_EMPTY_PRIMARY_COLOR = CREAM
-const MATCH_EMPTY_SECONDARY_COLOR = MUTED
+/** Changed from flat MUTED to the warmer MUTED_CREAM ("muted claro") - see that constant's own doc comment. */
+const MATCH_EMPTY_SECONDARY_COLOR = MUTED_CREAM
 
 /**
  * A dark, near-black outline on every text entity - TextShape supports
  * outlineWidth/outlineColor natively in this SDK (verified against the
  * installed package's own PBTextShape type). The panel's screen background
  * is a baked GLB texture we can't recolor from code (see this task's own
- * report) - an outline keeps cream/pink/teal text readable from several
+ * report) - an outline keeps cream/pink/teal/gold text readable from several
  * meters away regardless of what that background actually looks like.
+ *
+ * Width nudged 0.18 -> 0.20 (a small, deliberately non-dramatic bump) for
+ * this color pass - contrast is the absolute priority per explicit
+ * instruction, and the new GOLD/TEAL text in particular benefits from a
+ * slightly firmer edge; the color itself (already near-black) was left
+ * alone - there's no meaningful room to darken 0.05/0.02/0.05 further.
  */
 const TEXT_OUTLINE_COLOR = Color3.create(0.05, 0.02, 0.05)
-const TEXT_OUTLINE_WIDTH = 0.18
+const TEXT_OUTLINE_WIDTH = 0.2
 
 /**
  * Distance-legibility sizing, largest to smallest per this task's own
  * priority order (legibility > names > affinity/SP > shared answers).
- * ROW_FONT_SIZE_FIRST is a deliberately modest step up from ROW_FONT_SIZE
- * (not as large as TITLE_FONT_SIZE) - the #1 row should read as "a little
- * more important," never as a different sign entirely. The two match
- * sections' own mini-titles are intentionally smaller than the main title -
- * they're labels identifying a section, not headline content themselves.
+ * ROW_FONT_SIZE_FIRST is a deliberately modest step up from ROW_FONT_SIZE -
+ * the #1 row should read as "a little more important," never as a different
+ * sign entirely.
+ *
+ * TITLE_FONT_SIZE matches MATCH_TITLE_FONT_SIZE exactly - all three section
+ * titles (TOP SOCIAL QUESTERS/TOP MATCH THIS WEEK/ALL-TIME BEST MATCH) are
+ * the same size, so TOP SOCIAL QUESTERS reads as one of three equal
+ * sections, not a general panel title. Bumped together 0.95 -> 1.10 per
+ * explicit follow-up ("un poco más grandes") - all three titles are exactly
+ * 19 characters long (verified by count), so none carries more width risk
+ * than another at any shared size; 1.10 is still well under the 1.5 this
+ * same TEXT_WIDTH bound already carried without incident before the
+ * previous pass shrank it purely for hierarchy (not width) reasons, so this
+ * increase was judged safe without needing the 1.05 fallback.
+ *
+ * NAME_FONT_SIZE is new - a single shared size for every human name on this
+ * sign (Social Points #1/#2/#3, WEEKLY nameA/nameB, ALL-TIME nameA/nameB),
+ * replacing what used to be three different values (ROW_FONT_SIZE_FIRST/
+ * ROW_FONT_SIZE for Social Points names, MATCH_PAIR_FONT_SIZE for match
+ * names) per explicit "todos deben tener exactamente el mismo tamaño
+ * visual" instruction. Reuses MATCH_PAIR_FONT_SIZE's own existing value
+ * (1.1, already proven at both WEEKLY and ALL-TIME) rather than inventing a
+ * new number. ROW_FONT_SIZE/ROW_FONT_SIZE_FIRST still exist and are
+ * unchanged - they now govern ONLY rank+SP in each Social Points row (not
+ * name), preserving #1's rank/SP size difference exactly as it was; #1 still
+ * stands out through GOLD color alone for its name, never size. Match
+ * section names use NAME_FONT_SIZE instead of MATCH_PAIR_FONT_SIZE now -
+ * MATCH_PAIR_FONT_SIZE itself is untouched in value and now used solely for
+ * affinity (see createMatchSection).
  */
-const TITLE_FONT_SIZE = 1.5
+const TITLE_FONT_SIZE = 1.1
 const ROW_FONT_SIZE = 1.3
 const ROW_FONT_SIZE_FIRST = 1.5
-const MATCH_TITLE_FONT_SIZE = 0.95
+const MATCH_TITLE_FONT_SIZE = 1.1
+const NAME_FONT_SIZE = 1.1
+/** Affinity fontSize only now (see NAME_FONT_SIZE's own doc comment on why match names moved off this constant) - value unchanged. */
 const MATCH_PAIR_FONT_SIZE = 1.1
 const MATCH_PAIR_HEART_FONT_SIZE = 1.0
 const MATCH_SHARED_FONT_SIZE = 0.78
@@ -122,6 +179,8 @@ const MATCH_EMPTY_PRIMARY_FONT_SIZE = 1.0
 const MATCH_EMPTY_SECONDARY_FONT_SIZE = 0.72
 /** Small, no outline (see createTextEntity's own `withOutline` param) - an outlined divider would look like a bordered dash instead of a clean subtle line. */
 const DIVIDER_FONT_SIZE = 0.45
+/** DIVIDER_FONT_SIZE's own color - only still needed as a valid argument for the dash-text divider entities (dividerAfterSp/dividerAfterWeekly in ensureDisplayEntities), which are kept structurally but never have their text set (empty text, so this color has never actually been visible - there is no visible divider of any kind anymore, see DIVIDER_1_Y's own doc comment). */
+const DIVIDER_COLOR = Color4.create(0.97, 0.93, 0.86, 0.12)
 
 /**
  * Layout in the panel ENTITY's own local space (i.e. what a child Transform
@@ -132,37 +191,59 @@ const DIVIDER_FONT_SIZE = 0.45
  * pass - only what's built around it changed.
  */
 const SCREEN_CENTER_X = 0.7
-/** Top of the screen's usable area (screen spans local y ~1.57 to ~5.87) - title sits just below the top edge. Confirmed on-screen in preview at this Y. */
-const SCREEN_TITLE_Y = 5.55
+/**
+ * Lowered again this pass, 5.22 -> 5.02, to make room for a notably bigger
+ * LEADERBOARD plate (see TITLE_PLATE_WIDTH's own doc comment for the full
+ * top-down budget) - per explicit follow-up that the plate still "se ve
+ * pequeña" and should read as "un verdadero encabezado decorativo." Screen
+ * spans local y ~1.57 to ~5.87 - the plate, not this title, now owns the
+ * area near the top edge.
+ */
+const SCREEN_TITLE_Y = 5.02
 /** Screen surface is at local z ~ -6.671 (facing +Z); text sits a small standoff in front of it to avoid z-fighting with the "pantalla" mesh. Confirmed on-screen in preview at this Z. */
 const TEXT_LOCAL_Z = -6.6
 /** Matches the screen's real local width (~2.71) - the outer bound every column below stays inside. */
 const TEXT_WIDTH = 2.6
 
 /**
- * Vertical layout budget: from SCREEN_TITLE_Y (5.55) down to the last line
- * (ALLTIME_SHARED_Y, computed below) at 1.67 - safely inside the screen's own
- * ~1.57 floor with a small margin, reusing the exact same screen bounds the
- * original single-purpose layout was calibrated against. Ten lines total
- * (main title, 3 Social Points rows, 3 lines per match section x 2) fit in
- * that budget by tightening the Social Points row gap slightly (0.65 -> 0.52)
- * from the interim single-purpose pass - the two rows Social Points gave up
- * (5 -> 3) are what actually bought the room for the two match sections, not
- * a tighter fit than before this whole feature existed.
+ * Vertical layout budget for the SOCIAL POINTS block only (title + 3 rows) -
+ * compacted further this pass, on top of the previous pass's own cut, per
+ * explicit follow-up that the block still "se ve más grande que los otros."
+ * SP_TITLE_TO_ROW_GAP (title -> row #1) went 0.52 -> 0.40 -> 0.32.
+ * SP_ROW_GAP (row -> row, #1-#2 and #2-#3) went 0.52 -> 0.46 -> 0.40.
+ * By design, SP_ROW_3_Y lands on the exact same 3.90 it already had after
+ * the previous pass (a coincidence of this round's specific numbers, not a
+ * deliberate target) - DIVIDER_1_Y (which depends on it) therefore doesn't
+ * move again either. X positions (RANK_COLUMN_X/SCREEN_CENTER_X/SP_COLUMN_X)
+ * remain untouched - only Y moved, per explicit instruction.
  */
-const SP_ROW_GAP = 0.52
-const SP_ROW_1_Y = SCREEN_TITLE_Y - SP_ROW_GAP
+const SP_TITLE_TO_ROW_GAP = 0.32
+const SP_ROW_GAP = 0.4
+const SP_ROW_1_Y = SCREEN_TITLE_Y - SP_TITLE_TO_ROW_GAP
 const SP_ROW_2_Y = SP_ROW_1_Y - SP_ROW_GAP
 const SP_ROW_3_Y = SP_ROW_2_Y - SP_ROW_GAP
 
-/** Gap from one section's last line to the next section's own mini-title - deliberately bigger than the gaps within a section, so the three sections still read as visually distinct blocks. */
+/** Gap from one section's last line to the next section's own mini-title - deliberately bigger than the gaps within a section, so the three sections still read as visually distinct blocks. Still used for the WEEKLY -> ALL-TIME gap below - unchanged. No longer used for Social Points -> WEEKLY (see WEEKLY_TITLE_Y's own doc comment on why that link was deliberately cut this pass). */
 const SECTION_GAP = 0.48
 /** Gap from a match section's own mini-title to its pair row. */
 const MATCH_TITLE_TO_PAIR_GAP = 0.38
 /** Gap from a match section's pair row to its shared-answers row. */
 const MATCH_PAIR_TO_SHARED_GAP = 0.3
 
-const WEEKLY_TITLE_Y = SP_ROW_3_Y - SECTION_GAP
+/**
+ * FROZEN literal, not `SP_ROW_3_Y - SECTION_GAP` anymore - deliberately
+ * decoupled from the Social Points block this pass, per explicit "no tocar
+ * posiciones de Weekly y All-Time salvo que dependan de una constante
+ * compartida que tengas que separar." 3.51 is the EXACT value the old
+ * formula already produced (SP_ROW_3_Y was 3.99 before this pass's
+ * compaction, minus the old SECTION_GAP of 0.48) - so WEEKLY_PAIR_Y/
+ * WEEKLY_SHARED_Y/ALLTIME_* / DIVIDER_2_Y below (all still computed FROM this
+ * constant, formulas untouched) evaluate to the exact same numbers as
+ * before this pass, byte-for-byte. Only DIVIDER_1_Y (a midpoint between the
+ * now-compacted SP_ROW_3_Y and this fixed anchor) shifts slightly as a
+ * natural consequence - see that constant's own doc comment.
+ */
+const WEEKLY_TITLE_Y = 3.51
 const WEEKLY_PAIR_Y = WEEKLY_TITLE_Y - MATCH_TITLE_TO_PAIR_GAP
 const WEEKLY_SHARED_Y = WEEKLY_PAIR_Y - MATCH_PAIR_TO_SHARED_GAP
 
@@ -172,23 +253,71 @@ const ALLTIME_TITLE_Y = WEEKLY_SHARED_Y - SECTION_GAP + ALLTIME_Y_LIFT
 const ALLTIME_PAIR_Y = ALLTIME_TITLE_Y - MATCH_TITLE_TO_PAIR_GAP
 const ALLTIME_SHARED_Y = ALLTIME_PAIR_Y - MATCH_PAIR_TO_SHARED_GAP
 
-/** Dividers sit roughly midway through each SECTION_GAP - purely decorative, see DIVIDER_TEXT's own doc comment for why these are text, not geometry. */
+/**
+ * Y positions for the two (now text-only, invisible) divider entities - see
+ * dividerAfterSp/dividerAfterWeekly in ensureDisplayEntities. The visible
+ * teal divider PLANES that used to sit at these same Y values were removed
+ * per explicit "quitar completamente las líneas divisorias" instruction;
+ * these two Y constants stay defined because the empty dash-text entities
+ * (kept structurally, never visible - see their own doc comment) still
+ * reference them, so they are NOT actually dead code.
+ * DIVIDER_2_Y (WEEKLY/ALL-TIME) is byte-for-byte unchanged from before.
+ * DIVIDER_1_Y (Social Points/WEEKLY) is 3.705 - unaffected by this pass,
+ * still the same midpoint formula as always.
+ */
 const DIVIDER_1_Y = (SP_ROW_3_Y + WEEKLY_TITLE_Y) / 2
 const DIVIDER_2_Y = (WEEKLY_SHARED_Y + ALLTIME_TITLE_Y) / 2
 /**
- * A run of box-drawing dashes rather than actual mesh geometry - the brief
- * explicitly allows omitting dividers if they'd need "unnecessarily complex
- * geometry" (a MeshRenderer primitive + its own Material, oriented/parented
- * correctly, with no live preview available in this session to verify it
- * actually renders on the visible face without z-fighting or backface
- * culling issues). A TextShape is the one entity type already proven
- * reliable in this exact pipeline (same parent, same rotation, same font
- * system as every other line on this sign), so a low-alpha dash line reuses
- * a zero-risk mechanism instead of introducing an unverified one for a
- * purely decorative element.
+ * Small, deliberate 0.01-unit standoff from TEXT_LOCAL_Z (-6.6 -> -6.59) -
+ * originally sized for the (now-removed) divider planes, kept under this
+ * name only because TITLE_PLATE_Z below still reuses this exact value/
+ * reasoning for the LEADERBOARD plate's own Z. Renamed from DIVIDER_PLANE_Z
+ * to reflect that it's no longer divider-specific - same numeric value,
+ * name only, no position change.
  */
-const DIVIDER_TEXT = '────────────────────'
-const DIVIDER_COLOR = Color4.create(0.97, 0.93, 0.86, 0.12)
+const PLANE_STANDOFF_Z = TEXT_LOCAL_Z + 0.01
+
+/**
+ * "LEADERBOARD" title plate (PNG, 2172x724, RGBA, aspect ratio exactly 3:1)
+ * sitting above TOP SOCIAL QUESTERS - MeshRenderer.setPlane with a real
+ * texture + alpha blend (the same plane technique the now-removed divider
+ * bars used, with a flat color instead of a texture - see PLANE_STANDOFF_Z's
+ * own doc comment).
+ *
+ * SIZE, round 3 - 0.84x0.28 ("verlo primero") then 1.5x0.5 both still read
+ * as too small per explicit follow-up feedback ("se sigue viendo pequeña"),
+ * asking for something that reads as "un verdadero encabezado decorativo."
+ * Same strategy as before, taken further: SCREEN_TITLE_Y dropped again
+ * (5.22 -> 5.02) and the Social Points row gaps compacted further (see
+ * SP_TITLE_TO_ROW_GAP/SP_ROW_GAP's own doc comment) to free enough room for
+ * a notably bigger plate, while WEEKLY_TITLE_Y stays the same frozen literal
+ * it already was - WEEKLY/ALL-TIME still don't move.
+ *
+ * Budget top-down, from the screen's own usable ceiling (~5.87) to the new
+ * SCREEN_TITLE_Y (5.02):
+ *   0.03  margin under the ceiling
+ *   0.70  plate height (TITLE_PLATE_HEIGHT) - was 0.50
+ *   0.12  gap from the plate's own bottom edge to SCREEN_TITLE_Y (unchanged)
+ *   ------
+ *   0.85  = 5.87 - 5.02, exactly - the whole budget is accounted for.
+ * Width 2.1 (up from 1.5, and now inside the ORIGINAL 1.6-1.9 ask's upper
+ * end and beyond) at the real 3:1 ratio gives height 0.7 exactly - a 40%
+ * area increase over the previous pass. Still comfortably inside TEXT_WIDTH's
+ * own 2.6 bound (the screen's real usable width, ~2.71), though with less
+ * side margin than before. The 0.12 clearance to SCREEN_TITLE_Y carries over
+ * unchanged from the previous pass - still an estimate against the title's
+ * Y-CENTER rather than its unmeasurable real visual top edge (TextShape
+ * fontSize and a plane's Transform.scale remain different unit systems),
+ * worth a specific look in the next Explorer pass.
+ */
+const TITLE_PLATE_PATH = 'assets/images/leaderboard-3d-title.png'
+const TITLE_PLATE_ASPECT_RATIO = 2172 / 724
+const TITLE_PLATE_WIDTH = 2.1
+const TITLE_PLATE_HEIGHT = TITLE_PLATE_WIDTH / TITLE_PLATE_ASPECT_RATIO
+/** Top edge at 5.84 (0.03 under the ~5.87 ceiling), bottom edge at 5.14 (0.12 above the new SCREEN_TITLE_Y of 5.02) - see this constant block's own doc comment for the full top-down budget. */
+const TITLE_PLATE_Y = 5.49
+/** Same proven text/plane standoff from the screen surface - see PLANE_STANDOFF_Z's own doc comment. */
+const TITLE_PLATE_Z = PLANE_STANDOFF_Z
 
 /**
  * Per-row column layout, shared by both the Social Points block and each
@@ -390,6 +519,52 @@ function createTextEntity(
 }
 
 /**
+ * The small textured "LEADERBOARD" title plate - same parent/rotation
+ * convention as every text entity on this sign (parent: panelEntity,
+ * rotation: TEXT_ROTATION) - reusing the exact already-proven orientation
+ * fix rather than re-deriving one, so the plate faces the viewer correctly
+ * and isn't mirrored, same as every TextShape here. Real PNG texture (not a
+ * flat diffuseColor - see the now-removed createDividerPlane's own former
+ * use of that simpler approach) so its own transparent/soft edges (see
+ * TITLE_PLATE_PATH's own doc comment on the asset) render correctly rather
+ * than as a hard rectangle.
+ *
+ * MATERIAL CORRECTION from the original instruction: requested setBasicMaterial
+ * (unlit) + transparencyMode: MTM_ALPHA_BLEND together - checked against this
+ * SDK's own installed types (PBMaterial_UnlitMaterial, the exact param type
+ * setBasicMaterial takes) and transparencyMode is NOT one of its fields; the
+ * type comment on FlatMaterial's own transparencyMode is explicit: "(PBR
+ * only)". Passing it to setBasicMaterial would fail to compile (excess
+ * property on the object literal). MTM_ALPHA_BLEND is required to keep the
+ * asset's soft/antialiased edges (the explicit priority here) rather than a
+ * hard alphaTest cutout, so this uses setPbrMaterial instead - the only
+ * material type that actually exposes transparencyMode. To keep it reading
+ * as close to "flat/unlit" as this material type allows without using
+ * emissive (explicitly ruled out this pass), metallic/roughness are set to
+ * fully matte/non-reflective (0 / 1) - some scene-lighting response is still
+ * possible in principle, unlike the genuinely unlit dividers/text, and
+ * should be checked in the same Explorer pass as everything else.
+ */
+function createTitlePlate(parent: Entity): Entity {
+    const entity = engine.addEntity()
+    Transform.create(entity, {
+        parent,
+        position: Vector3.create(SCREEN_CENTER_X, TITLE_PLATE_Y, TITLE_PLATE_Z),
+        rotation: TEXT_ROTATION,
+        scale: Vector3.create(TITLE_PLATE_WIDTH, TITLE_PLATE_HEIGHT, 1)
+    })
+    MeshRenderer.setPlane(entity)
+    Material.setPbrMaterial(entity, {
+        texture: Material.Texture.Common({ src: TITLE_PLATE_PATH }),
+        transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND,
+        metallic: 0,
+        roughness: 1,
+        castShadows: false
+    })
+    return entity
+}
+
+/**
  * One match section's worth of entities (mini-title, pair row
  * nameA/heart/nameB/affinity, shared-answers line, and the two empty-state
  * lines) - shared shape/positions for both WEEKLY and ALL TIME, only the Y
@@ -401,12 +576,12 @@ function createTextEntity(
  * from the UI Label font this project's "✦" was originally proven in) isn't
  * worth the risk of a missing-glyph □ for a purely decorative element.
  */
-function createMatchSection(parent: Entity, titleY: number, pairY: number, sharedY: number): MatchSectionEntities {
+function createMatchSection(parent: Entity, titleY: number, pairY: number, sharedY: number, titleColor: Color4): MatchSectionEntities {
     return {
-        titleText: createTextEntity(parent, SCREEN_CENTER_X, titleY, MATCH_TITLE_FONT_SIZE, MATCH_TITLE_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH),
-        nameA: createTextEntity(parent, PAIR_NAME_A_X, pairY, MATCH_PAIR_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, PAIR_NAME_WIDTH),
+        titleText: createTextEntity(parent, SCREEN_CENTER_X, titleY, MATCH_TITLE_FONT_SIZE, titleColor, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH),
+        nameA: createTextEntity(parent, PAIR_NAME_A_X, pairY, NAME_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, PAIR_NAME_WIDTH),
         heart: createTextEntity(parent, PAIR_HEART_X, pairY, MATCH_PAIR_HEART_FONT_SIZE, MATCH_HEART_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, PAIR_HEART_WIDTH),
-        nameB: createTextEntity(parent, PAIR_NAME_B_X, pairY, MATCH_PAIR_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_LEFT, PAIR_NAME_WIDTH),
+        nameB: createTextEntity(parent, PAIR_NAME_B_X, pairY, NAME_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_LEFT, PAIR_NAME_WIDTH),
         affinity: createTextEntity(parent, PAIR_AFFINITY_X, pairY, MATCH_PAIR_FONT_SIZE, MATCH_AFFINITY_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, PAIR_AFFINITY_WIDTH),
         shared: createTextEntity(parent, SCREEN_CENTER_X, sharedY, MATCH_SHARED_FONT_SIZE, MATCH_SHARED_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH),
         // Empty-state lines occupy the SAME Y slots as pairY/sharedY - only one
@@ -426,6 +601,12 @@ function ensureDisplayEntities(): DisplayEntities | null {
         if (!panelEntity) return null
     }
 
+    // Small "LEADERBOARD" plate above the title - see TITLE_PLATE_WIDTH's own
+    // doc comment for why it's much smaller than originally requested (the
+    // math didn't work at the original size without moving SCREEN_TITLE_Y,
+    // which this pass deliberately leaves untouched).
+    createTitlePlate(panelEntity)
+
     // No flanking stars - a previous pass had "✦ TOP SOCIAL QUESTERS ✦"
     // (both stars proven fine in the 2D UI's own Label font, but that's a
     // DIFFERENT font/atlas from 3D TextShape - see this file's own report on
@@ -436,24 +617,34 @@ function ensureDisplayEntities(): DisplayEntities | null {
 
     const spRowYs = [SP_ROW_1_Y, SP_ROW_2_Y, SP_ROW_3_Y]
     const spRows: SocialPointsRowEntities[] = spRowYs.map((rowY, i) => {
+        // fontSize now governs rank+SP ONLY - name uses the shared NAME_FONT_SIZE instead (see
+        // its own doc comment), so #1's "toque especial" is color alone (gold rank+SP), never a
+        // bigger name. Slot i===0 always corresponds to the actual #1 ranked player (response.top
+        // is already rank-sorted - see applySocialPoints), so baking this in once at creation is
+        // safe regardless of who occupies that rank over time.
         const fontSize = i === 0 ? ROW_FONT_SIZE_FIRST : ROW_FONT_SIZE
+        const rankColor = i === 0 ? GOLD : RANK_COLOR
+        const spColor = i === 0 ? GOLD : SP_COLOR
         return {
-            rank: createTextEntity(panelEntity as Entity, RANK_COLUMN_X, rowY, fontSize, RANK_COLOR, TextAlignMode.TAM_MIDDLE_LEFT, RANK_COLUMN_WIDTH),
-            name: createTextEntity(panelEntity as Entity, SCREEN_CENTER_X, rowY, fontSize, NAME_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, NAME_COLUMN_WIDTH),
-            sp: createTextEntity(panelEntity as Entity, SP_COLUMN_X, rowY, fontSize, SP_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, SP_COLUMN_WIDTH)
+            rank: createTextEntity(panelEntity as Entity, RANK_COLUMN_X, rowY, fontSize, rankColor, TextAlignMode.TAM_MIDDLE_LEFT, RANK_COLUMN_WIDTH),
+            name: createTextEntity(panelEntity as Entity, SCREEN_CENTER_X, rowY, NAME_FONT_SIZE, NAME_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, NAME_COLUMN_WIDTH),
+            sp: createTextEntity(panelEntity as Entity, SP_COLUMN_X, rowY, fontSize, spColor, TextAlignMode.TAM_MIDDLE_RIGHT, SP_COLUMN_WIDTH)
         }
     })
 
+    // Dash-text divider entity kept structurally at DIVIDER_1_Y (never had visible text even
+    // before this pass) - the visible teal divider PLANE that used to sit at this same Y was
+    // removed per explicit "quitar completamente las líneas divisorias" instruction. No visual
+    // divider exists here anymore - the three sections separate by space/title-color/typography only.
     const dividerAfterSp = createTextEntity(panelEntity, SCREEN_CENTER_X, DIVIDER_1_Y, DIVIDER_FONT_SIZE, DIVIDER_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH, false)
-    setText(dividerAfterSp, DIVIDER_TEXT)
 
-    const weekly = createMatchSection(panelEntity, WEEKLY_TITLE_Y, WEEKLY_PAIR_Y, WEEKLY_SHARED_Y)
+    const weekly = createMatchSection(panelEntity, WEEKLY_TITLE_Y, WEEKLY_PAIR_Y, WEEKLY_SHARED_Y, WEEKLY_TITLE_COLOR)
     setText(weekly.titleText, WEEKLY_TITLE_TEXT)
 
+    // Same treatment as dividerAfterSp above - structural only, no visible divider plane anymore.
     const dividerAfterWeekly = createTextEntity(panelEntity, SCREEN_CENTER_X, DIVIDER_2_Y, DIVIDER_FONT_SIZE, DIVIDER_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH, false)
-    setText(dividerAfterWeekly, DIVIDER_TEXT)
 
-    const allTime = createMatchSection(panelEntity, ALLTIME_TITLE_Y, ALLTIME_PAIR_Y, ALLTIME_SHARED_Y)
+    const allTime = createMatchSection(panelEntity, ALLTIME_TITLE_Y, ALLTIME_PAIR_Y, ALLTIME_SHARED_Y, ALLTIME_TITLE_COLOR)
     setText(allTime.titleText, ALLTIME_TITLE_TEXT)
 
     display = { title, spRows, dividerAfterSp, weekly, dividerAfterWeekly, allTime }
