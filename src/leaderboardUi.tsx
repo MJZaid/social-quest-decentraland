@@ -185,9 +185,22 @@ const SUBTAB_HEIGHT = 30
 const SUBTAB_UNDERLINE_WIDTH = 44
 const SUBTAB_UNDERLINE_HEIGHT = 2
 
-/** Small close button size and inset, positioned top-right inside the safe area (absolute, zero flow-layout cost - see LeaderboardPanel's own doc comment for why it wasn't given its own reserved header row). */
+/**
+ * Close button sizing - now a genuine reserved row (CLOSE_BUTTON_ROW_HEIGHT)
+ * at the very top of the safe area, ABOVE LeaderboardTabBar, rather than an
+ * absolutely-positioned zero-flow-cost overlay sharing the tab row's own
+ * top-right corner (the previous approach - see LeaderboardPanel's own doc
+ * comment for the bug that caused: TOP MATCHES' larger hitbox, rendered
+ * after the X in the same parent, was winning the hit-test in that shared
+ * corner, so tapping the X actually switched tabs instead of closing).
+ * CLOSE_BUTTON_FONT_SIZE (the visible glyph) stays small and unchanged;
+ * CLOSE_BUTTON_HIT_PADDING pads its own tap target well beyond the glyph
+ * itself ("la X visual puede seguir siendo pequeña, pero el área clicable
+ * debe ser mayor") without needing a bigger row.
+ */
 const CLOSE_BUTTON_FONT_SIZE = 20
-const CLOSE_BUTTON_INSET = 2
+const CLOSE_BUTTON_ROW_HEIGHT = 32
+const CLOSE_BUTTON_HIT_PADDING = 8
 
 /**
  * Which main section of the Leaderboard panel is showing - module-level state,
@@ -341,13 +354,23 @@ export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () 
  * all baked in) plus the LEADERBOARD_SAFE_AREA_* percentage box for every
  * dynamic element. The old "✦ LEADERBOARD ✦" header row is gone entirely
  * (would duplicate the baked title) - the only header element left is the
- * close "✕", absolutely positioned in the safe area's top-right corner so it
- * costs zero flow-layout height (there was no vertical budget left to spare
- * for a separate reserved header row - see LEADERBOARD_PANEL_WIDTH_WIDE's
- * own doc comment on how tight the fit already is). It sits at the same
- * height as the tab bar's own top-right corner (TOP MATCHES) rather than
- * above it - a minor visual overlap with that pill's own corner, called out
- * explicitly in this task's report for a visual check, not hidden.
+ * close "✕".
+ *
+ * CLOSE BUTTON BUG FIX: the "✕" used to be absolutely positioned in the
+ * safe area's top-right corner, sharing that exact corner with the TOP
+ * MATCHES tab's own (much larger) hitbox - flagged as a visual-overlap risk
+ * when the plate was first added, and later confirmed as a real bug: TOP
+ * MATCHES, rendered after the X in the same parent, was winning the
+ * hit-test there, so tapping the X switched tabs instead of closing the
+ * panel. Fixed by giving the close button its own reserved row
+ * (CLOSE_BUTTON_ROW_HEIGHT) at the very top of the safe area, entirely
+ * before/above LeaderboardTabBar in the tree - no geometric overlap with
+ * either tab is possible anymore, regardless of render order. This does
+ * push the tab bar (and everything below it) down by that same row height -
+ * an unavoidable, deliberate consequence of "por encima de la fila de
+ * tabs," worth a specific check in the next Explorer pass given how tight
+ * this panel's vertical budget already was (see LEADERBOARD_PANEL_WIDTH_WIDE's
+ * own doc comment).
  */
 export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
     const response = getLatestLeaderboardResponse()
@@ -373,8 +396,19 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
                     flexDirection: 'column'
                 }}
             >
-                <UiEntity uiTransform={{ positionType: 'absolute', position: { top: CLOSE_BUTTON_INSET, right: CLOSE_BUTTON_INSET }, padding: 6 }} onMouseDown={close}>
-                    <Label value="✕" fontSize={CLOSE_BUTTON_FONT_SIZE} color={MAGENTA} />
+                {/* Independent close row - its own reserved space, entirely separate from the
+                    tab row below (and from either tab's own hitbox) in normal flow, not an
+                    absolute overlay sharing their corner anymore. See LeaderboardPanel's own
+                    doc comment for the bug this fixes. justifyContent:'flex-end' keeps the
+                    "✕" itself right-aligned, near the safe area's own inner right edge, same
+                    visual placement as before - only the hitbox is now truly independent. */}
+                <UiEntity uiTransform={{ width: '100%', height: CLOSE_BUTTON_ROW_HEIGHT, flexDirection: 'row', justifyContent: 'flex-end' }}>
+                    <UiEntity
+                        uiTransform={{ padding: CLOSE_BUTTON_HIT_PADDING, justifyContent: 'center', alignItems: 'center' }}
+                        onMouseDown={close}
+                    >
+                        <Label value="✕" fontSize={CLOSE_BUTTON_FONT_SIZE} color={MAGENTA} />
+                    </UiEntity>
                 </UiEntity>
 
                 <LeaderboardTabBar />
