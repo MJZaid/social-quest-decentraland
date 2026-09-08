@@ -410,47 +410,93 @@ const COMPACT_ROW_GAP = 16
 const MAX_CELEBRATION_NAMES = 3
 
 /**
- * Social Agenda ("VIEW ALL CONNECTIONS") panel width - it's a user-requested,
- * temporary central overlay (not the persistent HUD), so it's allowed to be
- * noticeably larger than the HUD panel while still leaving scene visible
- * around it. WIDE/COMPACT only, no separate very-small tier: pagination (see
- * AGENDA_ROWS_PER_PAGE) already keeps the panel's height bounded regardless of
- * canvas size, so a third width tier isn't needed to stay safe.
+ * Illustrated "open notebook" background replacing the old flat dark panel -
+ * SOCIAL AGENDA title, rings, tabs, and the "Friends" note are all baked into
+ * this PNG (1192x1320, RGBA, aspect ratio 1192/1320 = 0.9030). textureMode
+ * 'stretch' + box dimensions matching this exact ratio, same technique as
+ * every other background asset in this file (gameplay/lobby panel, celebration
+ * tiers) - never deformed.
  *
- * Brought down from an earlier 640/460 to the same order of magnitude as
- * leaderboardUi.tsx's own panel (560/420) - the wider version left
- * noticeably empty space to the right of each row's content, which is at
- * most one short line ("84% AFFINITY · 127 SHARED ANSWERS") plus a name and
- * a friendship level. 560 was re-checked to still fit that exact string
- * comfortably at the new, larger AGENDA_SECONDARY_FONT_SIZE_WIDE without
- * wrapping.
+ * Sizing derivation (see this task's report for the full pixel-sampled
+ * measurement): the illustrated asset's decoration (rings/tabs/header/bottom
+ * flower cluster) eats far more of the interior than the flat old panel did -
+ * a pixel-sampled scan (pngjs) of where the cream page is simultaneously free
+ * of ALL four decorations found a safe rectangle of only ~64% width x ~56%
+ * height of the full image (see AGENDA_SAFE_AREA_* below), well short of the
+ * "85-90%" a generic illustrated-panel estimate would assume. The panel is a
+ * FIXED width+height (matching the image 1:1), not an auto-growing minHeight
+ * box like the old flat panel - the illustrated frame doesn't resize itself
+ * to content, so a shorter page just leaves clean empty cream space at the
+ * bottom of the fixed safe area instead.
+ *
+ * WIDE was first set to 920x1019 (meets the old flat panel's 560 content-
+ * height floor with margin inside the measured ~56%-height safe area), then
+ * brought down to this smaller AGENDA_PANEL_WIDTH_WIDE/HEIGHT_WIDE per
+ * explicit follow-up feedback that 920x1019 read as too large on a full
+ * screen - a deliberate, requested trade: at 760x842 the safe area's real
+ * height budget (~842*0.56 = ~471) sits below that same 560 floor, so the
+ * absolute worst case (all 6 rows showing a reached friendship level, WIDE's
+ * larger row typography) has less slack than before and should be re-checked
+ * visually; COMPACT (already at this exact 760x842 pixel size before this
+ * change, since it targeted the smaller COMPACT floor of 460) is untouched.
  */
-const AGENDA_WIDTH_WIDE = 560
-const AGENDA_WIDTH_COMPACT = 420
-
-/** Rounds the Social Agenda panel's silhouette - same value/reasoning as leaderboardUi.tsx's own PANEL_BORDER_RADIUS, duplicated for the same "sibling panel, no cross-file dependency" reason as the color constants above. The header matches this on its own top corners only, so its opaque background doesn't square off the panel's rounded top. */
-const AGENDA_PANEL_BORDER_RADIUS = 20
-const AGENDA_HEADER_BORDER_RADIUS = { topLeft: AGENDA_PANEL_BORDER_RADIUS, topRight: AGENDA_PANEL_BORDER_RADIUS }
+const SOCIAL_AGENDA_PANEL_PATH = 'assets/images/social-agenda-panel.png'
+const SOCIAL_AGENDA_PANEL_ASPECT_RATIO = 1192 / 1320
+const AGENDA_PANEL_WIDTH_WIDE = 760
+const AGENDA_PANEL_HEIGHT_WIDE = 842
+const AGENDA_PANEL_WIDTH_COMPACT = 760
+const AGENDA_PANEL_HEIGHT_COMPACT = 842
 
 /**
- * Minimum height for the desktop (non-mobile) Agenda content area - keeps the
- * panel's total height stable across pages, so a partial last page (fewer
- * than AGENDA_ROWS_PER_PAGE connections) never renders a visibly shorter
- * panel than a full page does. Sized generously for AGENDA_ROWS_PER_PAGE (6)
- * rows at their worst case (every row showing all 3 lines, i.e. a friendship
- * level already reached) plus the "N CONNECTIONS" count line above them - a
- * minHeight, not a fixed height, so a future change to row count/spacing
- * can still grow past it safely. Deliberately NOT applied to the mobile
- * (compactUi) percentage-height variant below (MOBILE_AGENDA_MAX_HEIGHT) -
- * that's an existing, separate responsive mode this reskin doesn't touch.
- *
- * Raised from an earlier 520/430 to account for the larger row typography
- * and the new inter-row divider (see AGENDA_NAME_FONT_SIZE_WIDE and
- * AGENDA_ROW_DIVIDER_COLOR below) - a full 6-row page is now visibly taller,
- * so the "stable height across pages" floor needs to rise with it.
+ * Safe area for dynamic content - the pixel-sampled cream rectangle described
+ * above, expressed as percentages of the panel (so it scales identically
+ * across WIDE/COMPACT/mobile without re-measuring). Positioned/sized as an
+ * absolute box inside the panel, same pattern as the gameplay panel's own
+ * safe area (see SOCIAL_QUEST_PANEL_BACKGROUND_SAFE_AREA_*), except this one
+ * needs all four edges (left/top/width/height) rather than just top/height,
+ * since this asset has decoration on every side (rings left, tabs right,
+ * header top, flowers bottom) rather than only top/bottom.
  */
-const AGENDA_CONTENT_MIN_HEIGHT_WIDE = 560
-const AGENDA_CONTENT_MIN_HEIGHT_COMPACT = 460
+const AGENDA_SAFE_AREA_LEFT_PERCENT = '20%'
+const AGENDA_SAFE_AREA_TOP_PERCENT = '24%'
+const AGENDA_SAFE_AREA_WIDTH_PERCENT = '63%'
+const AGENDA_SAFE_AREA_HEIGHT_PERCENT = '56%'
+
+/**
+ * Real-mobile-device sizing (isRealMobileDevice, i.e. bare isMobile() - see
+ * SocialAgenda's own doc comment on why this is a different signal than
+ * `compactUi`). Computed from the SDK-reported live canvas size
+ * (UiCanvasInformation, same source getUiScale() itself reads) rather than a
+ * bare percentage string: this panel is now a background IMAGE that must
+ * never deform, and a plain CSS-style `width:'65%'` + `maxHeight:'70%'` pair
+ * (the previous approach, fine for an auto-height content box) does NOT
+ * preserve a fixed image aspect ratio - this SDK's UiTransform has no
+ * `aspectRatio` field (confirmed absent from its own typings) to do that
+ * declaratively. getMobileAgendaPanelSize() below instead computes an exact
+ * virtual-unit width/height pair that (a) renders at exactly 65% of the real
+ * device width OR 70% of the real device height, whichever is smaller (same
+ * "contain fit" logic getUiScale() itself already uses for the whole scene),
+ * and (b) always preserves SOCIAL_AGENDA_PANEL_ASPECT_RATIO exactly.
+ */
+const AGENDA_MOBILE_WIDTH_FRACTION = 0.65
+const AGENDA_MOBILE_MAX_HEIGHT_FRACTION = 0.7
+
+function getMobileAgendaPanelSize(): { width: number; height: number } {
+    const canvasInfo = UiCanvasInformation.getOrNull(engine.RootEntity)
+    const scale = getUiScale()
+    if (!canvasInfo || scale <= 0) {
+        // No live canvas data yet - fall back to the fixed COMPACT size rather than 0/NaN.
+        return { width: AGENDA_PANEL_WIDTH_COMPACT, height: AGENDA_PANEL_HEIGHT_COMPACT }
+    }
+    const widthDrivenWidth = (canvasInfo.width * AGENDA_MOBILE_WIDTH_FRACTION) / scale
+    const widthDrivenHeight = widthDrivenWidth / SOCIAL_AGENDA_PANEL_ASPECT_RATIO
+    const heightDrivenHeight = (canvasInfo.height * AGENDA_MOBILE_MAX_HEIGHT_FRACTION) / scale
+    const heightDrivenWidth = heightDrivenHeight * SOCIAL_AGENDA_PANEL_ASPECT_RATIO
+    // Contain-fit: whichever candidate is smaller respects BOTH the width and max-height limits at once, with zero deformation either way.
+    return widthDrivenHeight <= heightDrivenHeight
+        ? { width: widthDrivenWidth, height: widthDrivenHeight }
+        : { width: heightDrivenWidth, height: heightDrivenHeight }
+}
 
 /**
  * Row typography, tiered by the same `compactUi` signal (isMobile() || !wide)
@@ -504,34 +550,23 @@ const AGENDA_AVATAR_BORDER_WIDTH = 2
 const AGENDA_AVATAR_GAP_WIDE = 14
 const AGENDA_AVATAR_GAP_COMPACT = 10
 
-/** Dark translucent background for the profile-picture fallback silhouette - same PANEL_BACKGROUND every other dark surface in this scene uses, so an unresolved avatar still reads as "on-brand" rather than a broken placeholder. */
-const AGENDA_AVATAR_FALLBACK_BACKGROUND = PANEL_BACKGROUND
+/** Strong magenta fallback fill (same AGENDA_BADGE_BACKGROUND used for the "YOU" badge elsewhere) for the profile-picture fallback silhouette, now that the row sits on light cream instead of a dark panel - the cream-colored silhouette shapes need a saturated, contrasting circle behind them, not a light one. */
+const AGENDA_AVATAR_FALLBACK_BACKGROUND = AGENDA_BADGE_BACKGROUND
 
 /**
- * A very faint horizontal rule between consecutive connections - not a real
+ * A soft pastel-pink rule between consecutive connections - not a real
  * per-side border (uiTransform's borderWidth/borderColor apply to all four
  * sides at once in this SDK, with no per-side control - same limitation
  * already documented for leaderboardUi.tsx's subtab underline), so this is a
- * separate 1px-tall rectangle instead, low-alpha cream so it reads as a
- * whisper of separation, never a hard boundary or a "card" edge. Skipped
- * after the LAST row on a page (see SocialAgenda) so it never sits as a
- * stray line directly above the pagination footer.
+ * separate 1px-tall rectangle instead. Re-based on AGENDA_PINK now that the
+ * row sits on cream paper instead of a dark panel - the old low-alpha cream
+ * value (barely visible against near-black) would have all but disappeared
+ * against the new light background, so the divider needed a genuinely
+ * different color, not just a copy-pasted alpha tweak. Skipped after the LAST
+ * row on a page (see SocialAgenda) so it never sits as a stray line directly
+ * above the pagination footer.
  */
-const AGENDA_ROW_DIVIDER_COLOR = Color4.create(0.97, 0.93, 0.86, 0.08)
-
-/**
- * Mobile-only Social Agenda sizing (compactUi = isMobile() || !wide - see its
- * doc comment). Percentage strings, not a fixed virtual-unit width like
- * AGENDA_WIDTH_*: a fixed unit can't reliably express "60-70% of the real
- * device viewport" across the very different aspect ratios mobile landscape
- * devices can have, whereas a percentage resolves against the actual
- * full-screen wrapper this modal already centers in, regardless of device.
- * Narrow-but-non-mobile desktop windows are unaffected - they still use the
- * fixed AGENDA_WIDTH_COMPACT exactly as before, since compactUi (not bare
- * `!wide`) gates this.
- */
-const MOBILE_AGENDA_WIDTH = '65%'
-const MOBILE_AGENDA_MAX_HEIGHT = '70%'
+const AGENDA_ROW_DIVIDER_COLOR = Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, 0.4)
 
 /**
  * Entries shown per Agenda page. Chosen instead of a scrolling container: the
@@ -2187,6 +2222,16 @@ function affinityLabel(sameAnswers: number, differentAnswers: number): AffinityP
  * pure getFriendshipLevel(roundsTogether) lookup used everywhere else - no
  * threshold logic duplicated here. Paginated rather than scrolled - see
  * AGENDA_ROWS_PER_PAGE's comment for why.
+ *
+ * Illustrated-panel pass: the flat dark rectangle and its own opaque header
+ * bar are both gone, replaced by the SOCIAL_AGENDA_PANEL_PATH background
+ * image (SOCIAL AGENDA title, rings, tabs, "Friends" note all baked in) plus
+ * the AGENDA_SAFE_AREA_* percentage box for every dynamic element - see this
+ * task's report for the pixel-sampled safe-area measurement that box is
+ * based on. No connectionsManager/friendshipManager/compatibilityManager/
+ * socialNotificationsManager/profilePictureManager call changed, and
+ * agendaRevealedConnectionIds' reveal-scoped-to-one-opening lifecycle is
+ * untouched - only how their results are painted.
  */
 const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }) => {
     const allConnections = getAllConnections()
@@ -2197,20 +2242,24 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
     const canGoNext = socialAgendaPage < totalPages - 1
 
     /**
-     * Panel WIDTH/height-cap uses `isMobile()` directly - NOT the `compactUi`
-     * prop (isMobile() || !wide) - deliberately different from every other
-     * use of `compactUi` in this component (row typography still uses it,
+     * Panel sizing uses `isMobile()` directly - NOT the `compactUi` prop
+     * (isMobile() || !wide) - deliberately different from every other use of
+     * `compactUi` in this component (row typography still uses it,
      * unchanged). `compactUi` goes true on ANY narrow canvas, including a
-     * small desktop preview window - that's correct for "should this text be
-     * smaller," but wrong for "should this panel switch to a percentage-of-
-     * screen width," which should only ever happen on an actual phone.
-     * leaderboardUi.tsx's own panel has no percentage-width branch at all -
-     * it's ALWAYS a fixed AGENDA_WIDTH_WIDE/COMPACT-equivalent pixel value,
-     * on every platform - and this now matches that same criterion for every
-     * non-mobile viewport, however narrow. MOBILE_AGENDA_WIDTH/MAX_HEIGHT are
-     * only reached on a confirmed real device.
+     * small desktop preview window - correct for "should this text be
+     * smaller," wrong for "should this panel switch to a percentage-of-real-
+     * device-width," which should only happen on an actual phone. See
+     * getMobileAgendaPanelSize's own doc comment for why real mobile now
+     * needs its own computed size rather than a bare percentage string, now
+     * that the panel is a fixed-aspect-ratio background image.
      */
     const isRealMobileDevice = isMobile()
+    const panelSize = isRealMobileDevice
+        ? getMobileAgendaPanelSize()
+        : {
+              width: wide ? AGENDA_PANEL_WIDTH_WIDE : AGENDA_PANEL_WIDTH_COMPACT,
+              height: wide ? AGENDA_PANEL_HEIGHT_WIDE : AGENDA_PANEL_HEIGHT_COMPACT
+          }
 
     const close = () => {
         socialAgendaOpen = false
@@ -2218,60 +2267,46 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
 
     return (
         <UiEntity
-            uiTransform={
-                isRealMobileDevice
-                    ? { flexDirection: 'column', width: MOBILE_AGENDA_WIDTH, maxHeight: MOBILE_AGENDA_MAX_HEIGHT, borderRadius: AGENDA_PANEL_BORDER_RADIUS }
-                    : {
-                          flexDirection: 'column',
-                          width: wide ? AGENDA_WIDTH_WIDE : AGENDA_WIDTH_COMPACT,
-                          borderRadius: AGENDA_PANEL_BORDER_RADIUS
-                      }
-            }
-            uiBackground={{ color: PANEL_BACKGROUND }}
+            uiTransform={{ width: panelSize.width, height: panelSize.height }}
+            uiBackground={{ texture: { src: SOCIAL_AGENDA_PANEL_PATH }, textureMode: 'stretch' }}
         >
-            {/* Header is the whole-row tap target to close - generous padding (not just the "✕"
-                glyph). This is the only close control now; no footer bar (see report). Top corners match the panel's own
-                radius so this opaque rectangle doesn't square off the panel's rounded top -
-                same technique as leaderboardUi.tsx's own header. */}
+            {/* Safe area: the pixel-sampled cream rectangle (see AGENDA_SAFE_AREA_*'s own
+                doc comment), positioned as an absolute box so every dynamic element scales
+                with the panel identically across WIDE/COMPACT/mobile. Holds everything
+                dynamic - the baked "SOCIAL AGENDA" title/star and the "Friends" note live
+                outside this box, in the image itself, never re-rendered here. */}
             <UiEntity
                 uiTransform={{
-                    width: '100%',
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: { top: 18, bottom: 18, left: 20, right: 20 },
-                    borderRadius: AGENDA_HEADER_BORDER_RADIUS
-                }}
-                uiBackground={{ color: PANEL_BACKGROUND }}
-                onMouseDown={close}
-            >
-                {/* "SOCIAL AGENDA" - renamed from "MY SOCIAL QUEST" so this panel and
-                    leaderboardUi.tsx's "LEADERBOARD" read as two sibling tools sharing one
-                    naming convention, same star-accent treatment as that header. */}
-                <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Label value="✦" fontSize={18} color={AGENDA_PINK} />
-                    <UiEntity uiTransform={{ width: 10 }} />
-                    <Label value="SOCIAL AGENDA" fontSize={22} color={AGENDA_CREAM} />
-                </UiEntity>
-                <Label value="✕" fontSize={22} color={AGENDA_PINK} />
-            </UiEntity>
-
-            <UiEntity
-                uiTransform={{
+                    positionType: 'absolute',
+                    position: { top: AGENDA_SAFE_AREA_TOP_PERCENT, left: AGENDA_SAFE_AREA_LEFT_PERCENT },
+                    width: AGENDA_SAFE_AREA_WIDTH_PERCENT,
+                    height: AGENDA_SAFE_AREA_HEIGHT_PERCENT,
                     flexDirection: 'column',
-                    width: '100%',
-                    minHeight: isRealMobileDevice ? undefined : wide ? AGENDA_CONTENT_MIN_HEIGHT_WIDE : AGENDA_CONTENT_MIN_HEIGHT_COMPACT,
-                    padding: { top: 16, bottom: 20, left: 20, right: 20 }
+                    padding: { top: 4, bottom: 8, left: 6, right: 6 }
                 }}
             >
+                {/* Dynamic close control - the ONLY header element left. "SOCIAL AGENDA" and
+                    its star accent are baked into the panel image now, so they're not
+                    re-rendered here (that would duplicate the title). Small and top-right,
+                    clear of both the baked title and the "Friends" note above it (see
+                    report for the measured clearance) - a big invisible header-wide tap
+                    zone (like the old opaque header bar had) was deliberately skipped: this
+                    task can't live-verify exact pill-shape bounds in a running preview, and
+                    a wrongly-guessed invisible zone risks either blocking taps on content
+                    below it or missing the tap entirely - a small precise button is the
+                    reliable choice. */}
+                <UiEntity uiTransform={{ positionType: 'absolute', position: { top: 0, right: 0 }, padding: 10 }} onMouseDown={close}>
+                    <Label value="✕" fontSize={wide ? 20 : 17} color={AGENDA_BADGE_BACKGROUND} />
+                </UiEntity>
+
                 {allConnections.length === 0 ? (
-                    <UiEntity uiTransform={COLUMN_CENTERED}>
-                        {/* Copy unchanged from the already-shipped empty state - only color changed (cream/muted, matching the rest of this redesign). */}
-                        <Label value="No Connections yet." fontSize={20} color={AGENDA_CREAM} uiTransform={{ margin: { bottom: 8 } }} />
+                    <UiEntity uiTransform={{ ...COLUMN_CENTERED, height: '100%', justifyContent: 'center' }}>
+                        {/* Copy unchanged from the already-shipped empty state - only color changed (magenta/muted-plum, matching the illustrated redesign). */}
+                        <Label value="No Connections yet." fontSize={20} color={AGENDA_BADGE_BACKGROUND} uiTransform={{ margin: { bottom: 8 } }} />
                         <Label
                             value="Play Social Quest with someone to make your first Connection."
                             fontSize={16}
-                            color={MUTED}
+                            color={CREAM_PANEL_TEXT_MUTED}
                             textAlign="middle-center"
                             textWrap="wrap"
                         />
@@ -2281,8 +2316,8 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                         <Label
                             value={`${allConnections.length} CONNECTION${allConnections.length === 1 ? '' : 'S'}`}
                             fontSize={AGENDA_COUNT_FONT_SIZE}
-                            color={MUTED}
-                            uiTransform={{ margin: { bottom: 14 } }}
+                            color={AGENDA_BADGE_BACKGROUND}
+                            uiTransform={{ margin: { top: 6, bottom: 14 } }}
                         />
                         {/* REVEAL banner - scoped to THIS opening only (agendaRevealedConnectionIds
                             is reset to [] the moment Agenda closes, see uiMenu's own per-frame
@@ -2292,9 +2327,9 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             the data this panel already has. Names beyond MAX_CELEBRATION_NAMES
                             collapse into "+N more" (own join here - the HUD toasts above no longer
                             list multiple names at all, so there's nothing shared to reuse). Visual
-                            treatment deliberately simple/placeholder - a
-                            bordered box in the panel's own existing palette, not yet the
-                            nine-slice/sticker polish planned for a later pass. */}
+                            treatment: a soft pink-wash note card (no solid dark fill) so it reads
+                            as part of the cream page rather than a separate opaque box - lives
+                            entirely inside the safe area, so it can never cover the baked title. */}
                         {agendaRevealedConnectionIds.length > 0 &&
                             (() => {
                                 const revealedNames = agendaRevealedConnectionIds.map((otherUserId) => {
@@ -2317,13 +2352,13 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                             borderWidth: 1,
                                             borderColor: AGENDA_PINK
                                         }}
-                                        uiBackground={{ color: PANEL_BACKGROUND }}
+                                        uiBackground={{ color: Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, 0.12) }}
                                     >
-                                        <Label value={headerText} fontSize={wide ? 18 : 15} color={AGENDA_PINK} />
+                                        <Label value={headerText} fontSize={wide ? 18 : 15} color={AGENDA_BADGE_BACKGROUND} />
                                         <Label
                                             value={`${namesText} joined your Social Agenda`}
                                             fontSize={wide ? 15 : 13}
-                                            color={AGENDA_CREAM}
+                                            color={CREAM_PANEL_TEXT_MUTED}
                                             textWrap="wrap"
                                             uiTransform={{ margin: { top: 4 } }}
                                         />
@@ -2378,7 +2413,7 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                                 height: avatarSize,
                                                 borderRadius: avatarSize / 2,
                                                 borderWidth: AGENDA_AVATAR_BORDER_WIDTH,
-                                                borderColor: AGENDA_CREAM,
+                                                borderColor: AGENDA_PINK,
                                                 overflow: 'hidden',
                                                 flexShrink: 0
                                             }}
@@ -2427,13 +2462,13 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                                 THIS Agenda opening's reveal (see agendaRevealedConnectionIds' own doc
                                                 comment) - gone on the very next opening. */}
                                             <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
-                                                <Label value={name} fontSize={nameFontSize} color={AGENDA_CREAM} />
+                                                <Label value={name} fontSize={nameFontSize} color={AGENDA_BADGE_BACKGROUND} />
                                                 {isNewRow && (
                                                     <UiEntity
                                                         uiTransform={{ margin: { left: 8 }, padding: { top: 2, bottom: 2, left: 6, right: 6 }, borderRadius: 6 }}
-                                                        uiBackground={{ color: AGENDA_PINK }}
+                                                        uiBackground={{ color: AGENDA_BADGE_BACKGROUND }}
                                                     >
-                                                        <Label value="NEW" fontSize={compactUi ? 10 : 11} color={PANEL_BACKGROUND} />
+                                                        <Label value="NEW" fontSize={compactUi ? 10 : 11} color={AGENDA_CREAM} />
                                                     </UiEntity>
                                                 )}
                                             </UiEntity>
@@ -2444,9 +2479,14 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                                 with, shown muted rather than pink so they read as calm/expected,
                                                 never like an error. */}
                                             <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
-                                                <Label value={affinity.primary} fontSize={secondaryFontSize} color={affinity.secondary ? AGENDA_PINK : MUTED} textWrap="wrap" />
+                                                <Label
+                                                    value={affinity.primary}
+                                                    fontSize={secondaryFontSize}
+                                                    color={affinity.secondary ? AGENDA_PINK : CREAM_PANEL_TEXT_MUTED}
+                                                    textWrap="wrap"
+                                                />
                                                 {affinity.secondary && (
-                                                    <Label value={` · ${affinity.secondary}`} fontSize={secondaryFontSize} color={MUTED} textWrap="wrap" />
+                                                    <Label value={` · ${affinity.secondary}`} fontSize={secondaryFontSize} color={CREAM_PANEL_TEXT_MUTED} textWrap="wrap" />
                                                 )}
                                             </UiEntity>
                                             {/* Line 3: Friendship level (teal, its own bit of personality) +
@@ -2455,11 +2495,11 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                             {level !== null && (
                                                 <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
                                                     <Label value={`✦ ${level}`} fontSize={tertiaryFontSize} color={AGENDA_TEAL} textWrap="wrap" />
-                                                    <Label value=" · " fontSize={tertiaryFontSize} color={MUTED} />
+                                                    <Label value=" · " fontSize={tertiaryFontSize} color={CREAM_PANEL_TEXT_MUTED} />
                                                     <Label
                                                         value={`${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
                                                         fontSize={tertiaryFontSize}
-                                                        color={MUTED}
+                                                        color={CREAM_PANEL_TEXT_MUTED}
                                                         textWrap="wrap"
                                                     />
                                                 </UiEntity>
@@ -2478,24 +2518,26 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
 
                         {totalPages > 1 && (
                             <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', margin: { top: 8 } }}>
+                                {/* "Tab"-styled pagination pills - soft pink wash, rounded like the pastel
+                                    tabs on the illustrated panel's own right edge, code-only (no new asset). */}
                                 <UiEntity
-                                    uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 8 }}
-                                    uiBackground={{ color: PANEL_BACKGROUND }}
+                                    uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 12 }}
+                                    uiBackground={{ color: Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, canGoPrevious ? 0.35 : 0.15) }}
                                     onMouseDown={() => {
                                         if (canGoPrevious) socialAgendaPage -= 1
                                     }}
                                 >
-                                    <Label value="PREV" fontSize={14} color={canGoPrevious ? AGENDA_CREAM : MUTED} />
+                                    <Label value="PREV" fontSize={14} color={canGoPrevious ? AGENDA_BADGE_BACKGROUND : CREAM_PANEL_TEXT_MUTED} />
                                 </UiEntity>
-                                <Label value={`${socialAgendaPage + 1} / ${totalPages}`} fontSize={14} color={MUTED} />
+                                <Label value={`${socialAgendaPage + 1} / ${totalPages}`} fontSize={14} color={CREAM_PANEL_TEXT_MUTED} />
                                 <UiEntity
-                                    uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 8 }}
-                                    uiBackground={{ color: PANEL_BACKGROUND }}
+                                    uiTransform={{ padding: { top: 8, bottom: 8, left: 14, right: 14 }, borderRadius: 12 }}
+                                    uiBackground={{ color: Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, canGoNext ? 0.35 : 0.15) }}
                                     onMouseDown={() => {
                                         if (canGoNext) socialAgendaPage += 1
                                     }}
                                 >
-                                    <Label value="NEXT" fontSize={14} color={canGoNext ? AGENDA_CREAM : MUTED} />
+                                    <Label value="NEXT" fontSize={14} color={canGoNext ? AGENDA_BADGE_BACKGROUND : CREAM_PANEL_TEXT_MUTED} />
                                 </UiEntity>
                             </UiEntity>
                         )}
