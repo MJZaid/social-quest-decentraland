@@ -106,13 +106,30 @@ const VIRTUAL_HEIGHT = 1080
  * via LEADERBOARD_PANEL_ASPECT_RATIO, so a plain percentage width/maxHeight pair
  * would deform it). Same contain-fit computation as getMobileAgendaPanelSize
  * (whichever candidate is smaller respects both bounds with zero deformation).
- * Bumped 0.24/0.32 -> 0.30/0.40 per real-device feedback that the first mobile
- * pass shrank this panel too far. (History: derived from (640/1920)*0.72=0.24,
- * (480/1080)*0.72=0.32 per "~70-75% of current size" feedback, which proved
- * too aggressive once actually seen on a phone.)
+ * Bumped again 0.34/0.46 -> 0.38/0.52 per real-device feedback that Top
+ * Matches was still cramped - the last row visually touching the panel's
+ * bottom edge, "shared answers" barely legible. (History: 0.24/0.32 ->
+ * 0.30/0.40 -> 0.34/0.46 -> 0.38/0.52 -> 0.38/0.58, each a real-device
+ * correction.) See also MOBILE_LEADERBOARD_TOP_N below - the row COUNT was
+ * also capped on mobile specifically, since even a larger panel is still
+ * smaller than desktop's and Top 5 + YOUR RANK already didn't reliably fit
+ * even at desktop size (see LeaderboardReadyContent's own pre-existing doc
+ * comment on this exact limitation).
+ *
+ * HEIGHT-only bump 0.52 -> 0.58 (WIDTH_FRACTION untouched at 0.38): analysis
+ * of a typical wide-landscape phone aspect (~19.5:9, noticeably wider than
+ * the 16:9 virtual canvas this scene is authored against) points to real
+ * device HEIGHT, not width, as this panel's actual binding contain-fit
+ * constraint - and the close-button mobile fix (CLOSE_BUTTON_ROW_HEIGHT_MOBILE
+ * + its own margin-bottom, see that constant's doc comment) made the safe
+ * area's own header taller, eating further into the vertical room Top
+ * Matches' 4 rows have to work with. Growing only the height fraction
+ * targets the dimension actually constraining the panel, recovering real
+ * usable height for row #4's "shared answers" line without touching width,
+ * fonts, or TopMatchRow's own spacing.
  */
-const LEADERBOARD_MOBILE_WIDTH_FRACTION = 0.3
-const LEADERBOARD_MOBILE_MAX_HEIGHT_FRACTION = 0.4
+const LEADERBOARD_MOBILE_WIDTH_FRACTION = 0.38
+const LEADERBOARD_MOBILE_MAX_HEIGHT_FRACTION = 0.58
 
 function getMobileLeaderboardPanelSize(): { width: number; height: number } {
     const canvasInfo = UiCanvasInformation.getOrNull(engine.RootEntity)
@@ -163,6 +180,8 @@ const LEADERBOARD_SAFE_AREA_HEIGHT_PERCENT = '53%'
  * area, never the count itself.
  */
 const LEADERBOARD_TOP_N = 5
+/** Mobile-only (isMobile() real device) cap on how many Social Points rows are actually rendered - see LeaderboardReadyContent's own doc comment. Desktop keeps showing all of LEADERBOARD_TOP_N, unchanged. Does NOT change what's requested (still LEADERBOARD_TOP_N via requestLeaderboard) - purely trims the already-fetched `top` array before rendering, so no networking call changes. */
+const LEADERBOARD_MOBILE_TOP_N = 4
 
 /**
  * Fixed per-row height - trimmed from the flat-panel pass's 40/32 down to
@@ -195,6 +214,42 @@ const LEADERBOARD_ROW_GAP = 6
  */
 const TOP_MATCH_ROW_GAP_WIDE = 14
 const TOP_MATCH_ROW_GAP_COMPACT = 12
+/**
+ * Mobile-only (isMobile() real device) structural fix for TopMatchRow - real-
+ * device feedback showed row N's "N SHARED ANSWERS" line visually bleeding
+ * into row N+1's name line. Root cause: unlike every other multi-line row in
+ * this codebase (ResultColumn's title/stats/name rows in ui.tsx, Social
+ * Agenda's own rows), TopMatchRow's second line was a bare Label with no
+ * reserved height - this SDK's flex layout doesn't reliably feed a bare
+ * Label's own measured height back into its column parent (the exact same
+ * root cause already documented and fixed for those other components), so
+ * the column's auto-computed height under-reserved space for it. At
+ * desktop's more generous absolute scale this was never visible; at the
+ * smaller mobile panel it became a real collision. TOP_MATCH_SHARED_LINE_
+ * HEIGHT_MOBILE gives that second line an explicit reserved height (same
+ * proven technique as ResultColumn), TOP_MATCH_SHARED_MARGIN_TOP_MOBILE
+ * widens the gap between line 1 and line 2 slightly beyond the existing
+ * flat `3`, and TOP_MATCH_ROW_GAP_MOBILE gives a bit more breathing room
+ * between consecutive matches than COMPACT's 12. Desktop (wide and
+ * non-mobile COMPACT) is completely unaffected - these are only ever read
+ * inside TopMatchRow's `isRealMobileDevice` branch.
+ *
+ * Second pass: real-device feedback said "shared answers" was still barely
+ * legible and everything read cramped even after the first fixed-height
+ * pass, so this round also bumps the gap/height/margin further AND (unlike
+ * the first pass, which deliberately left fontSize/color alone) nudges the
+ * "shared answers" line's own font size up (10 -> 11, still smaller than
+ * the name/affinity line's 13, preserving the visual hierarchy) and its
+ * color to a darker, more legible variant than the shared MUTED (which
+ * every other muted label in this file also uses, so it was left
+ * untouched) - TOP_MATCH_SHARED_COLOR_MOBILE, mobile-only.
+ */
+const TOP_MATCH_ROW_GAP_MOBILE = 20
+const TOP_MATCH_SHARED_LINE_HEIGHT_MOBILE = 18
+const TOP_MATCH_SHARED_MARGIN_TOP_MOBILE = 8
+const TOP_MATCH_SHARED_FONT_SIZE_MOBILE = 11
+/** Darker than the shared MUTED (0.45, 0.32, 0.4) - mobile-only, "shared answers" line specifically, per explicit legibility feedback. MUTED itself is untouched (used broadly elsewhere in this file, including this same row's desktop branch). */
+const TOP_MATCH_SHARED_COLOR_MOBILE = Color4.create(0.32, 0.2, 0.28, 1)
 /**
  * Extra breathing room between the THIS WEEK/ALL TIME subtab bar (and its
  * underline) and match #1's own pair line - per explicit feedback that #1
@@ -242,6 +297,30 @@ const SUBTAB_UNDERLINE_HEIGHT = 2
 const CLOSE_BUTTON_FONT_SIZE = 20
 const CLOSE_BUTTON_ROW_HEIGHT = 32
 const CLOSE_BUTTON_HIT_PADDING = 8
+
+/**
+ * Mobile-only (isMobile() real device) fix for a regression of the exact bug
+ * this whole close-button-row design was built to prevent (see this block's
+ * own doc comment above): CLOSE_BUTTON_ROW_HEIGHT (32) never accounted for
+ * the close button's OWN hit-padding inflating its rendered/clickable size
+ * past that declared row height - a ~20px glyph + 8px padding on every side
+ * renders a hitbox roughly 40px tall, ~8px taller than its 32px row, with no
+ * `overflow:hidden` to clip it. At desktop's absolute scale that ~8px
+ * overflow was apparently never enough to meaningfully win the hit-test
+ * against LeaderboardTabBar starting immediately below (this was working on
+ * desktop, per explicit confirmation) - but real-device testing showed it
+ * DOES overlap TOP MATCHES' own tap zone on the smaller mobile panel, once
+ * again letting TOP MATCHES steal the tap instead of closing the panel.
+ * Fixed by giving mobile alone a taller row (safely containing the full
+ * hit-padded box with margin to spare) plus a small explicit gap below it
+ * before the tab bar starts - not by shrinking the hit padding (which stays
+ * generous, or even grows slightly - "que sea fácil de tocar" on a phone).
+ * Desktop keeps CLOSE_BUTTON_ROW_HEIGHT/CLOSE_BUTTON_HIT_PADDING exactly as
+ * they are, unchanged.
+ */
+const CLOSE_BUTTON_ROW_HEIGHT_MOBILE = 48
+const CLOSE_BUTTON_HIT_PADDING_MOBILE = 10
+const CLOSE_BUTTON_ROW_MARGIN_BOTTOM_MOBILE = 8
 
 /**
  * Which main section of the Leaderboard panel is showing - module-level state,
@@ -311,6 +390,9 @@ const LEADERBOARD_BUTTON_ICON_SIZE_HOVER_COMPACT = 56
 const LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_COMPACT = 48
 const LEADERBOARD_ICON_PATH = 'assets/images/leaderboard-icon.png'
 
+/** Mobile-only icon-size multiplier - same value/reasoning as ui.tsx's own HUD_MOBILE_ICON_SCALE (duplicated for the same "sibling surfaces" reason as the constants above), so both HUD icons stay the exact same visual size on a real phone. */
+const HUD_MOBILE_ICON_SCALE = 1.12
+
 /**
  * Opens the Leaderboard overlay - same fixed-position role in the HUD group
  * as SocialAgendaButton next to it, same ANSWERING/ANSWER LOCKED tap-disable
@@ -340,11 +422,13 @@ const LEADERBOARD_ICON_PATH = 'assets/images/leaderboard-icon.png'
 export const LeaderboardButton = ({ wide, onOpen }: { wide: boolean; onOpen: () => void }) => {
     const hitArea = wide ? LEADERBOARD_BUTTON_HIT_AREA_WIDE : LEADERBOARD_BUTTON_HIT_AREA_COMPACT
     const active = leaderboardOpen
-    const iconSize = leaderboardButtonPressed
+    const baseIconSize = leaderboardButtonPressed
         ? (wide ? LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_PRESSED_COMPACT)
         : active || leaderboardButtonHovered
           ? (wide ? LEADERBOARD_BUTTON_ICON_SIZE_HOVER_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_HOVER_COMPACT)
           : (wide ? LEADERBOARD_BUTTON_ICON_SIZE_WIDE : LEADERBOARD_BUTTON_ICON_SIZE_COMPACT)
+    // Mobile-only post-multiply - see HUD_MOBILE_ICON_SCALE's own doc comment.
+    const iconSize = isMobile() ? baseIconSize * HUD_MOBILE_ICON_SCALE : baseIconSize
 
     return (
         <UiEntity
@@ -451,10 +535,25 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
                     absolute overlay sharing their corner anymore. See LeaderboardPanel's own
                     doc comment for the bug this fixes. justifyContent:'flex-end' keeps the
                     "✕" itself right-aligned, near the safe area's own inner right edge, same
-                    visual placement as before - only the hitbox is now truly independent. */}
-                <UiEntity uiTransform={{ width: '100%', height: CLOSE_BUTTON_ROW_HEIGHT, flexDirection: 'row', justifyContent: 'flex-end' }}>
+                    visual placement as before - only the hitbox is now truly independent.
+                    Mobile-only (isMobile()): taller row + a small bottom margin - see
+                    CLOSE_BUTTON_ROW_HEIGHT_MOBILE's own doc comment for the regression this
+                    fixes. Desktop takes the exact original values, unchanged. */}
+                <UiEntity
+                    uiTransform={{
+                        width: '100%',
+                        height: isMobile() ? CLOSE_BUTTON_ROW_HEIGHT_MOBILE : CLOSE_BUTTON_ROW_HEIGHT,
+                        flexDirection: 'row',
+                        justifyContent: 'flex-end',
+                        margin: isMobile() ? { bottom: CLOSE_BUTTON_ROW_MARGIN_BOTTOM_MOBILE } : undefined
+                    }}
+                >
                     <UiEntity
-                        uiTransform={{ padding: CLOSE_BUTTON_HIT_PADDING, justifyContent: 'center', alignItems: 'center' }}
+                        uiTransform={{
+                            padding: isMobile() ? CLOSE_BUTTON_HIT_PADDING_MOBILE : CLOSE_BUTTON_HIT_PADDING,
+                            justifyContent: 'center',
+                            alignItems: 'center'
+                        }}
                         onMouseDown={close}
                     >
                         <Label value="✕" fontSize={CLOSE_BUTTON_FONT_SIZE} color={MAGENTA} />
@@ -463,7 +562,19 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
 
                 <LeaderboardTabBar />
 
-                <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', flexGrow: 1, padding: { top: 12, bottom: 14, left: 16, right: 16 } }}>
+                {/* Mobile-only extra padding (isMobile()) - per explicit "más aire lateral y
+                    vertical" feedback on Top Matches (this wrapper is shared by both tabs, so
+                    Social Points also gets a touch more breathing room, a harmless side effect -
+                    it had no complaint and comfortable slack already). Desktop keeps the exact
+                    original 12/14/16/16 padding, unchanged. */}
+                <UiEntity
+                    uiTransform={{
+                        flexDirection: 'column',
+                        width: '100%',
+                        flexGrow: 1,
+                        padding: isMobile() ? { top: 16, bottom: 20, left: 20, right: 20 } : { top: 12, bottom: 14, left: 16, right: 16 }
+                    }}
+                >
                     {leaderboardTab === 'socialPoints' ? (
                         response === null ? (
                             <Label value="Loading leaderboard..." fontSize={16} color={MAGENTA} />
@@ -757,9 +868,17 @@ const TopMatchRow = ({ entry, wide }: { entry: TopMatchRankedEntry; wide: boolea
     const sharedLabel = `${entry.sharedValidAnswers} SHARED ANSWER${entry.sharedValidAnswers === 1 ? '' : 'S'}`
     const isTopRank = entry.rank === 1
     const rankColor = isTopRank ? GOLD : TEAL
+    // Mobile-only structural fix - see TOP_MATCH_ROW_GAP_MOBILE's own doc comment. Desktop (wide and non-mobile COMPACT) takes the untouched `else` branch below, byte-identical to before.
+    const isRealMobileDevice = isMobile()
 
     return (
-        <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', margin: { bottom: wide ? TOP_MATCH_ROW_GAP_WIDE : TOP_MATCH_ROW_GAP_COMPACT } }}>
+        <UiEntity
+            uiTransform={{
+                flexDirection: 'column',
+                width: '100%',
+                margin: { bottom: isRealMobileDevice ? TOP_MATCH_ROW_GAP_MOBILE : wide ? TOP_MATCH_ROW_GAP_WIDE : TOP_MATCH_ROW_GAP_COMPACT }
+            }}
+        >
             <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
                     <Label value={`#${entry.rank}`} fontSize={wide ? 14 : 12} color={rankColor} />
@@ -772,12 +891,27 @@ const TopMatchRow = ({ entry, wide }: { entry: TopMatchRankedEntry; wide: boolea
                 </UiEntity>
                 <Label value={`${Math.round(entry.affinity)}%`} fontSize={wide ? 15 : 13} color={TEAL} />
             </UiEntity>
-            <Label
-                value={sharedLabel}
-                fontSize={wide ? 11 : 10}
-                color={MUTED}
-                uiTransform={{ margin: { top: 3, left: wide ? 28 : 24 } }}
-            />
+            {isRealMobileDevice ? (
+                // Reserved height + own font size/color - see TOP_MATCH_SHARED_FONT_SIZE_MOBILE/
+                // TOP_MATCH_SHARED_COLOR_MOBILE's own doc comment (second legibility pass).
+                <UiEntity
+                    uiTransform={{
+                        width: '100%',
+                        height: TOP_MATCH_SHARED_LINE_HEIGHT_MOBILE,
+                        alignItems: 'flex-start',
+                        margin: { top: TOP_MATCH_SHARED_MARGIN_TOP_MOBILE, left: 24 }
+                    }}
+                >
+                    <Label value={sharedLabel} fontSize={TOP_MATCH_SHARED_FONT_SIZE_MOBILE} color={TOP_MATCH_SHARED_COLOR_MOBILE} />
+                </UiEntity>
+            ) : (
+                <Label
+                    value={sharedLabel}
+                    fontSize={wide ? 11 : 10}
+                    color={MUTED}
+                    uiTransform={{ margin: { top: 3, left: wide ? 28 : 24 } }}
+                />
+            )}
         </UiEntity>
     )
 }
@@ -797,17 +931,35 @@ const TopMatchRow = ({ entry, wide }: { entry: TopMatchRankedEntry; wide: boolea
  * fit panel). When the local player is NOT in the visible Top 5, expect this
  * block to extend past the safe cream zone toward the bottom pink frame -
  * flagged explicitly in this task's report for visual QA, not hidden.
+ *
+ * MOBILE-ONLY ABSOLUTE ROW CAP: on a real phone (isMobile()), this renders AT
+ * MOST LEADERBOARD_MOBILE_TOP_N (4) rows TOTAL, counting the "YOUR RANK"
+ * block as one of those rows - not "top 4 THEN also a 5th YOUR RANK row"
+ * (what a naive top.slice(0, 4) + the existing YOUR RANK block below would
+ * still produce, since meAlreadyInTop was being checked against the trimmed
+ * list, not this in-or-out decision). Concretely: check membership against
+ * the untrimmed top-4 FIRST (`localInMobileTop4`) - if the local player is
+ * genuinely in it, show exactly those 4 rows, no YOUR RANK block needed
+ * (already covered). If `me === null` (no progress yet at all - the "You
+ * haven't made progress yet." message renders instead of YOUR RANK, no extra
+ * row to make room for either), also show the full 4. ONLY when the local
+ * player exists AND is genuinely outside the top 4 does this drop to top 3,
+ * leaving exactly one row's worth of room for YOUR RANK below to fill - 3 + 1
+ * = 4, never 5. Desktop is unaffected - `visibleTop` equals `top` there,
+ * unchanged, same original 5-row (+ YOUR RANK) behavior.
  */
 const LeaderboardReadyContent = ({ response, wide }: { response: LeaderboardResponse; wide: boolean }) => {
     const { top, me } = response
-    const meAlreadyInTop = me !== null && top.some((entry) => entry.userId === me.userId)
+    const needsMobileRankRow = me !== null && !top.slice(0, LEADERBOARD_MOBILE_TOP_N).some((entry) => entry.userId === me.userId)
+    const visibleTop = isMobile() ? top.slice(0, needsMobileRankRow ? LEADERBOARD_MOBILE_TOP_N - 1 : LEADERBOARD_MOBILE_TOP_N) : top
+    const meAlreadyInTop = me !== null && visibleTop.some((entry) => entry.userId === me.userId)
 
     return (
         <UiEntity uiTransform={{ flexDirection: 'column', width: '100%' }}>
-            {top.length === 0 ? (
+            {visibleTop.length === 0 ? (
                 <Label value="No players ranked yet." fontSize={14} color={MAGENTA} />
             ) : (
-                top.map((entry) => (
+                visibleTop.map((entry) => (
                     <UiEntity key={entry.userId} uiTransform={{ width: '100%' }}>
                         <LeaderboardRow entry={entry} highlighted={me !== null && entry.userId === me.userId} wide={wide} />
                     </UiEntity>

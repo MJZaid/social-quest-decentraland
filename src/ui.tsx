@@ -262,8 +262,31 @@ const HUD_TOP_MARGIN = 10
  * inset for the relocated top-right HUD cluster. Desktop keeps the existing
  * centered two-slot row entirely untouched - see uiMenu's own isRealMobileDevice
  * branch for both JSX paths.
+ *
+ * History: 16 -> 6 (first nudge right) was not enough - Social Agenda's own
+ * baked-in top decoration (see SOCIAL_AGENDA_PANEL_PATH, a centered overlay)
+ * was still partially covering the Agenda icon when opened. Now 6 -> -44 (a
+ * further ~50px shift right) per explicit feedback that a clearly bigger move
+ * was needed. This SDK's UiTransform has no separate transform/translate
+ * primitive (confirmed absent from this session's own typings audits) - a
+ * `position.right` offset IS the only mechanism available for nudging an
+ * absolutely-positioned entity, so going negative here (pushing the cluster
+ * past ScreenInsetArea's own safe-area inset, toward the true screen edge) is
+ * that "offset/translate on the whole container," not a different technique.
+ * `top`, icon sizes (HUD_MOBILE_ICON_SCALE), SOCIAL_HUD_GROUP_GAP, and the SP
+ * counter's own size are all completely untouched - only this one offset
+ * changed, so the group moves as a single rigid unit. Real-device
+ * confirmation still pending (this task's own next step) - if the SP counter
+ * turns out to clip the true screen edge, this needs to come back up
+ * slightly, not further negative.
+ *
+ * History: -44 was still not enough - Social Agenda's own centered overlay
+ * (see SOCIAL_AGENDA_PANEL_PATH) was still catching the Agenda icon's corner
+ * when opened. Nudged another 20px right, -44 -> -64. Same mechanism, same
+ * caveat: if this clips the SP counter off the real screen edge, come back
+ * up (less negative), never push further negative blindly.
  */
-const HUD_MOBILE_RIGHT_MARGIN = 16
+const HUD_MOBILE_RIGHT_MARGIN = -64
 
 /**
  * Conservative mobile-only shrink factor for the "questions panel" (the
@@ -319,6 +342,22 @@ const AGENDA_BUTTON_ICON_SIZE_COMPACT = 52
 const AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT = 56
 const AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT = 48
 const SOCIAL_AGENDA_ICON_PATH = 'assets/images/social-agenda-icon.png'
+
+/**
+ * Mobile-only (isMobile() real device) icon-size multiplier for the HUD's
+ * Agenda/Leaderboard icons - per explicit "12% bigger, balanced" feedback.
+ * Applied as a post-multiply on whatever idle/hover/pressed size the existing
+ * wide/compact tiers already compute (SocialAgendaButton here, and
+ * LeaderboardButton's own identical LEADERBOARD_BUTTON_ICON_SIZE_* in
+ * leaderboardUi.tsx - same constant value duplicated there, same "sibling
+ * surfaces" precedent already used for those two constant blocks). Never
+ * touches AGENDA_BUTTON_HIT_AREA_* (the invisible tap target) - COMPACT's
+ * hit area (64) still comfortably contains even the largest scaled icon
+ * (HOVER: 56*1.12=62.72), so no separate hit-area change was needed. Desktop
+ * (`wide`, non-mobile compact) is completely unaffected - this only ever
+ * multiplies when isMobile() is true.
+ */
+const HUD_MOBILE_ICON_SCALE = 1.12
 
 /**
  * Unseen-Connections badge, overlaid on SocialAgendaButton only - reads as a
@@ -551,6 +590,35 @@ const AGENDA_SECONDARY_FONT_SIZE_COMPACT = 14
 const AGENDA_TERTIARY_FONT_SIZE_WIDE = 17
 const AGENDA_TERTIARY_FONT_SIZE_COMPACT = 13
 
+/**
+ * Mobile-only (isMobile() real device, NOT the `compactUi` tier - a small
+ * desktop preview window must keep the exact COMPACT sizes above) row
+ * typography, ~12% larger than COMPACT per explicit "~10-15%" legibility
+ * feedback: 17*1.12=19.04 (rounded 19), 14*1.12=15.68 (rounded 16),
+ * 13*1.12=14.56 (rounded 15). Only used inside the row map below - the count
+ * line/header/pagination footer are untouched.
+ */
+const AGENDA_NAME_FONT_SIZE_MOBILE = 19
+const AGENDA_SECONDARY_FONT_SIZE_MOBILE = 16
+const AGENDA_TERTIARY_FONT_SIZE_MOBILE = 15
+
+/**
+ * Mobile-only, higher-contrast row color overrides - per explicit real-device
+ * legibility feedback. These are NEW, separate constants, never a change to
+ * AGENDA_PINK/AGENDA_TEAL/CREAM_PANEL_TEXT_MUTED themselves (all three are
+ * used throughout this file well beyond Social Agenda's rows, e.g. avatar
+ * borders, dividers, WAITING/RESULT copy, the HUD counter) - desktop keeps
+ * exactly those original colors, unchanged, "estética pastel" intact. Name
+ * color is untouched on both platforms: AGENDA_BADGE_BACKGROUND (0.95, 0.2,
+ * 0.5) is already the dark, saturated magenta this task asks for.
+ * - Affinity: darker/more saturated pink than the pale AGENDA_PINK (1, 0.75, 0.9).
+ * - Shared answers/rounds: darker mauve than CREAM_PANEL_TEXT_MUTED (0.45, 0.32, 0.4).
+ * - Friendship tier: a stronger, more saturated blue than the pale AGENDA_TEAL (0.4, 0.75, 1).
+ */
+const AGENDA_MOBILE_AFFINITY_COLOR = Color4.create(0.85, 0.22, 0.48, 1)
+const AGENDA_MOBILE_MUTED_COLOR = Color4.create(0.32, 0.18, 0.26, 1)
+const AGENDA_MOBILE_TIER_COLOR = Color4.create(0.1, 0.5, 0.9, 1)
+
 /** "N CONNECTIONS" count line - stays MUTED (still secondary metadata) but a touch larger than before (16 -> 17) for slightly more visibility, per explicit feedback that it "works well" but could read a bit stronger. */
 const AGENDA_COUNT_FONT_SIZE = 17
 
@@ -612,6 +680,48 @@ const AGENDA_ROW_DIVIDER_COLOR = Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGE
  * "reliability over sophistication" guidance for this feature.
  */
 const AGENDA_ROWS_PER_PAGE = 4
+/**
+ * Reduced row count for DESKTOP ONLY (never real mobile, which always stays
+ * at AGENDA_ROWS_PER_PAGE=4) - used when EITHER isDesktopNarrow (uiScale too
+ * low for this specific panel) OR hasAgendaBanner (the REVEAL banner is
+ * eating real height) is true - see SocialAgenda's own doc comment for both
+ * conditions. Normal desktop with no banner keeps 4, unchanged.
+ */
+const AGENDA_ROWS_PER_PAGE_DESKTOP_NARROW = 3
+/**
+ * Agenda-SPECIFIC desktop-narrow scale threshold - deliberately NOT
+ * WIDE_MIN_SCALE (0.65). Real-device measurement (via the temp diagnostic
+ * label) at window sizes where rows visibly overlapped: uiScale = 0.728
+ * (1398x826) and, still overlapping even at 4 rows, uiScale = 0.829
+ * (1592x954) - both comfortably ABOVE the old width/height-derived
+ * breakpoints (1248/702) and above the first 0.80 threshold, so those
+ * checks reported `narrow: false` at sizes that were already broken. 0.65
+ * (and later 0.80) were simply too low FOR THIS PANEL specifically (a
+ * fixed 760x842 image that never shrinks itself between WIDE/COMPACT,
+ * unlike most other panels in this file - see AGENDA_PANEL_WIDTH_COMPACT's
+ * own doc comment). 0.86 sits just above the measured 0.829 breaking
+ * point, with a small safety margin. This constant is scoped to
+ * SocialAgenda alone - WIDE_MIN_SCALE itself, and every other component
+ * that reads it, are completely untouched.
+ */
+const AGENDA_DESKTOP_NARROW_SCALE_THRESHOLD = 0.86
+
+// Desktop-narrow only: minimum gap the flexGrow spacer must reserve between
+// the last connection row and the PREV/NEXT strip (it absorbs whatever
+// leftover space exists, but a full page leaves little to absorb - this
+// floor keeps the strip from ever crowding the last row), and the extra
+// bottom margin that keeps the strip off the panel's own bottom edge.
+const AGENDA_DESKTOP_NARROW_FOOTER_MIN_GAP = 16
+const AGENDA_DESKTOP_NARROW_FOOTER_BOTTOM_MARGIN = 10
+
+// Desktop-wide and mobile: top margin on the PREV/NEXT strip, bumped from the
+// old flat 8 so there's always a small breathing gap above it, same as
+// desktop-narrow already had via its own spacer. Desktop-narrow keeps its own
+// top:8 (the flexGrow spacer above already does the real separation there).
+const AGENDA_FOOTER_TOP_MARGIN = 18
+
+/** Mobile-only RESULTS-title-to-cards gap - see its own use in RevealResults for why this needed to grow independently of GAMEPLAY_MOBILE_SCALE. Bumped again 18 -> 26 alongside the rest of the RESULT-on-mobile layout pass (see RESULTS_CARD_*_MOBILE's own doc comment) for a clearly visible gap now that the cards are also smaller. */
+const RESULTS_TITLE_MARGIN_BOTTOM_MOBILE = 20
 
 /**
  * Maximum names shown per RESULT option column before collapsing the rest into
@@ -682,6 +792,53 @@ const REVEAL_COLUMN_BACKGROUND = Color4.create(0.77, 0.87, 0.91, 1)
 const REVEAL_COLUMN_BORDER_WIDTH = 1
 /** Rounded a bit more than the old dark card's sharp-ish 10, to read as "cute" against the pastel fill - layout/size untouched, this only affects corner rounding. */
 const REVEAL_COLUMN_BORDER_RADIUS = 16
+
+/**
+ * RESULT-on-mobile-only layout (isMobile() real device - never touches
+ * ANSWERING, never touches desktop/`wide`/COMPACT-small-window sizing). Root
+ * cause: GAMEPLAY_MOBILE_SCALE shrinks the OUTER gameplay panel container,
+ * but every size below (title font, card width, title/stats/name-row
+ * heights, padding, fonts) is a fixed pixel value from the COMPACT tier,
+ * never itself scaled by that outer shrink - at the smaller mobile panel,
+ * full-COMPACT-size cards AND the unconditional 32px "RESULTS" title ran too
+ * wide/tall for the cream safe area and pushed past its edges/bottom. These
+ * are a THIRD, independent tier (not a multiply-COMPACT factor) so each
+ * value can be tuned on its own from real-device feedback.
+ *
+ * Second pass (more aggressive than the first, which was still overflowing)
+ * fixed the overflow but overshot - too small. Third pass ("middle ground")
+ * grew everything back but STILL read too small per real-device feedback.
+ * Fourth pass pushes font sizes/row-heights/padding/width essentially back
+ * to full COMPACT parity (the same numbers ANSWERING/RESULT already use on a
+ * small desktop window) - the earlier passes were being too conservative on
+ * a lever (per-card size/font) that was never the real overflow driver.
+ * REVEAL_MAX_NAMES_MOBILE stays at 2 (unchanged, still the single biggest
+ * height-saving lever) and RESULTS_TITLE_FONT_SIZE_MOBILE stays well under
+ * the old unconditional 32 - between the two of those, the card content
+ * below can afford to read at essentially COMPACT's own size without
+ * reproducing the original overflow:
+ *   title font 24 -> 26         width      185 -> 205   gap   11 -> 13
+ *   padding     9 -> 11         title-area 32 -> 36      stats 16 -> 17
+ *   name-row   18 -> 19         title font 14 -> 15 (= COMPACT)
+ *   stats font 12 -> 13 (= COMPACT)   name font 13 -> 14 (= COMPACT)
+ *   YOU badge font 8 -> 9 (= COMPACT)   +N MORE font 11 -> 12 (= COMPACT)
+ * RESULTS_TITLE_MARGIN_BOTTOM_MOBILE left at 20 - already gave clear
+ * separation from RESULTS per the last real-device check, no complaint
+ * about it this round.
+ */
+const RESULTS_TITLE_FONT_SIZE_MOBILE = 26
+const REVEAL_MAX_NAMES_MOBILE = 2
+const RESULTS_CARD_WIDTH_MOBILE = 205
+const RESULTS_CARD_GAP_MOBILE = 13
+const RESULTS_CARD_PADDING_MOBILE = 11
+const RESULTS_CARD_TITLE_AREA_HEIGHT_MOBILE = 36
+const RESULTS_CARD_STATS_ROW_HEIGHT_MOBILE = 17
+const RESULTS_CARD_NAME_ROW_HEIGHT_MOBILE = 19
+const RESULTS_CARD_TITLE_FONT_SIZE_MOBILE = 15
+const RESULTS_CARD_STATS_FONT_SIZE_MOBILE = 13
+const RESULTS_CARD_NAME_FONT_SIZE_MOBILE = 14
+const RESULTS_CARD_YOU_BADGE_FONT_SIZE_MOBILE = 9
+const RESULTS_CARD_MORE_FONT_SIZE_MOBILE = 12
 
 /**
  * Purely presentational truncation for a RESULT name row - never touches
@@ -1757,7 +1914,7 @@ const RevealResults = ({
     reveal: RevealData
 }) => {
     const wide = getUiScale() >= WIDE_MIN_SCALE
-    const maxNames = wide ? REVEAL_MAX_NAMES_WIDE : REVEAL_MAX_NAMES_COMPACT
+    const maxNames = isMobile() ? REVEAL_MAX_NAMES_MOBILE : wide ? REVEAL_MAX_NAMES_WIDE : REVEAL_MAX_NAMES_COMPACT
     const { opacity, scale } = getResultRevealPresentation()
 
     const entriesA = reveal.entries.filter((entry) => entry.option === 'A')
@@ -1783,12 +1940,19 @@ const RevealResults = ({
         <UiEntity uiTransform={COLUMN_CENTERED}>
             <Label
                 value="RESULTS"
-                fontSize={32}
+                fontSize={isMobile() ? RESULTS_TITLE_FONT_SIZE_MOBILE : 32}
                 color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
                 // Trimmed 16 -> 6 to help fit the smaller gameplay panel (see
                 // GAMEPLAY_PANEL_HEIGHT_WIDE's own doc comment) - still a real gap
                 // from the two ResultColumns below, just tighter than before.
-                uiTransform={{ margin: { bottom: 6 } }}
+                // Mobile-only (isMobile()) bump 6 -> 18: GAMEPLAY_MOBILE_SCALE shrinks
+                // the OUTER gameplay panel container, but this internal margin (like
+                // every other fixed-pixel value inside RevealResults/ResultColumn) is
+                // NOT itself scaled by that - at the smaller mobile panel size the old
+                // 6px gap let the ResultColumn cards' top edge cover "RESULTS". Purely
+                // this one margin - GAMEPLAY_MOBILE_SCALE, ANSWERING, and the two
+                // ResultColumn cards themselves are untouched.
+                uiTransform={{ margin: { bottom: isMobile() ? RESULTS_TITLE_MARGIN_BOTTOM_MOBILE : 6 } }}
             />
             <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'center', alignItems: 'flex-start' }}>
                 <ResultColumn
@@ -1803,7 +1967,7 @@ const RevealResults = ({
                     opacity={opacity}
                     scale={scale}
                 />
-                <UiEntity uiTransform={{ width: wide ? 24 : 14 }} />
+                <UiEntity uiTransform={{ width: isMobile() ? RESULTS_CARD_GAP_MOBILE : wide ? 24 : 14 }} />
                 <ResultColumn
                     label="B"
                     optionText={optionBText}
@@ -1859,19 +2023,23 @@ const ResultColumn = ({
     opacity: number
     scale: number
 }) => {
+    // Mobile-only third tier - see RESULTS_CARD_*_MOBILE's own doc comment for why this is
+    // independent of both `wide` and GAMEPLAY_MOBILE_SCALE. Never affects ANSWERING (this
+    // component only renders for RESULT) or desktop (isRealMobileDevice is false there).
+    const isRealMobileDevice = isMobile()
     const shown = entries.slice(0, maxNames)
     const remaining = entries.length - shown.length
-    const rowHeight = wide ? REVEAL_NAME_ROW_HEIGHT_WIDE : REVEAL_NAME_ROW_HEIGHT_COMPACT
+    const rowHeight = isRealMobileDevice ? RESULTS_CARD_NAME_ROW_HEIGHT_MOBILE : wide ? REVEAL_NAME_ROW_HEIGHT_WIDE : REVEAL_NAME_ROW_HEIGHT_COMPACT
     // Fixed height for nameListRows rows plus the gaps between them (none if there are no rows at all).
     const nameListHeight = nameListRows > 0 ? nameListRows * rowHeight + (nameListRows - 1) * REVEAL_NAME_ROW_GAP : 0
 
     return (
         <UiEntity
             uiTransform={{
-                width: (wide ? 320 : 220) * scale,
+                width: isRealMobileDevice ? RESULTS_CARD_WIDTH_MOBILE : (wide ? 320 : 220) * scale,
                 flexDirection: 'column',
                 alignItems: 'flex-start',
-                padding: wide ? 18 : 12,
+                padding: isRealMobileDevice ? RESULTS_CARD_PADDING_MOBILE : wide ? 18 : 12,
                 borderColor: Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGENDA_PINK.b, opacity),
                 borderWidth: REVEAL_COLUMN_BORDER_WIDTH,
                 borderRadius: REVEAL_COLUMN_BORDER_RADIUS
@@ -1885,14 +2053,14 @@ const ResultColumn = ({
             <UiEntity
                 uiTransform={{
                     width: '100%',
-                    height: wide ? REVEAL_TITLE_AREA_HEIGHT_WIDE : REVEAL_TITLE_AREA_HEIGHT_COMPACT,
+                    height: isRealMobileDevice ? RESULTS_CARD_TITLE_AREA_HEIGHT_MOBILE : wide ? REVEAL_TITLE_AREA_HEIGHT_WIDE : REVEAL_TITLE_AREA_HEIGHT_COMPACT,
                     alignItems: 'flex-start',
-                    margin: { bottom: 8 }
+                    margin: { bottom: isRealMobileDevice ? 5 : 8 }
                 }}
             >
                 <Label
                     value={optionText}
-                    fontSize={wide ? REVEAL_TITLE_FONT_SIZE_WIDE : REVEAL_TITLE_FONT_SIZE_COMPACT}
+                    fontSize={isRealMobileDevice ? RESULTS_CARD_TITLE_FONT_SIZE_MOBILE : wide ? REVEAL_TITLE_FONT_SIZE_WIDE : REVEAL_TITLE_FONT_SIZE_COMPACT}
                     color={Color4.create(AGENDA_BADGE_BACKGROUND.r, AGENDA_BADGE_BACKGROUND.g, AGENDA_BADGE_BACKGROUND.b, opacity)}
                     textWrap="wrap"
                     uiTransform={{ width: '100%' }}
@@ -1903,14 +2071,14 @@ const ResultColumn = ({
             <UiEntity
                 uiTransform={{
                     width: '100%',
-                    height: wide ? REVEAL_STATS_ROW_HEIGHT_WIDE : REVEAL_STATS_ROW_HEIGHT_COMPACT,
+                    height: isRealMobileDevice ? RESULTS_CARD_STATS_ROW_HEIGHT_MOBILE : wide ? REVEAL_STATS_ROW_HEIGHT_WIDE : REVEAL_STATS_ROW_HEIGHT_COMPACT,
                     alignItems: 'flex-start',
-                    margin: { bottom: 12 }
+                    margin: { bottom: isRealMobileDevice ? 8 : 12 }
                 }}
             >
                 <Label
                     value={`${count} PLAYER${count === 1 ? '' : 'S'} · ${percent}%`}
-                    fontSize={wide ? 16 : 13}
+                    fontSize={isRealMobileDevice ? RESULTS_CARD_STATS_FONT_SIZE_MOBILE : wide ? 16 : 13}
                     color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
                 />
             </UiEntity>
@@ -1946,7 +2114,7 @@ const ResultColumn = ({
                         >
                             <Label
                                 value={truncateResultName(entry.name, wide)}
-                                fontSize={wide ? 18 : 14}
+                                fontSize={isRealMobileDevice ? RESULTS_CARD_NAME_FONT_SIZE_MOBILE : wide ? 18 : 14}
                                 color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
                             />
                             {/* "YOU" badge - purely a comparison against myProfile.userId (already
@@ -1959,7 +2127,7 @@ const ResultColumn = ({
                                 >
                                     <Label
                                         value="YOU"
-                                        fontSize={wide ? 11 : 9}
+                                        fontSize={isRealMobileDevice ? RESULTS_CARD_YOU_BADGE_FONT_SIZE_MOBILE : wide ? 11 : 9}
                                         color={Color4.create(AGENDA_CREAM.r, AGENDA_CREAM.g, AGENDA_CREAM.b, opacity)}
                                         textWrap="nowrap"
                                     />
@@ -1972,7 +2140,7 @@ const ResultColumn = ({
                     <UiEntity uiTransform={{ width: '100%', height: rowHeight, alignItems: 'center' }}>
                         <Label
                             value={`+${remaining} MORE`}
-                            fontSize={wide ? 15 : 12}
+                            fontSize={isRealMobileDevice ? RESULTS_CARD_MORE_FONT_SIZE_MOBILE : wide ? 15 : 12}
                             color={Color4.create(CREAM_PANEL_TEXT_MUTED.r, CREAM_PANEL_TEXT_MUTED.g, CREAM_PANEL_TEXT_MUTED.b, opacity)}
                         />
                     </UiEntity>
@@ -2219,11 +2387,13 @@ const SocialPointsValidRoundToast = ({ data, wide }: { data: ActiveSocialPointsR
 const SocialAgendaButton = ({ wide }: { wide: boolean }) => {
     const hitArea = wide ? AGENDA_BUTTON_HIT_AREA_WIDE : AGENDA_BUTTON_HIT_AREA_COMPACT
     const active = socialAgendaOpen
-    const iconSize = socialAgendaButtonPressed
+    const baseIconSize = socialAgendaButtonPressed
         ? (wide ? AGENDA_BUTTON_ICON_SIZE_PRESSED_WIDE : AGENDA_BUTTON_ICON_SIZE_PRESSED_COMPACT)
         : active || socialAgendaButtonHovered
           ? (wide ? AGENDA_BUTTON_ICON_SIZE_HOVER_WIDE : AGENDA_BUTTON_ICON_SIZE_HOVER_COMPACT)
           : (wide ? AGENDA_BUTTON_ICON_SIZE_WIDE : AGENDA_BUTTON_ICON_SIZE_COMPACT)
+    // Mobile-only post-multiply - see HUD_MOBILE_ICON_SCALE's own doc comment.
+    const iconSize = isMobile() ? baseIconSize * HUD_MOBILE_ICON_SCALE : baseIconSize
     const unseenCount = getUnseenConnectionCount()
     const badgeText = unseenCount > AGENDA_BADGE_MAX_DISPLAY ? `${AGENDA_BADGE_MAX_DISPLAY}+` : `${unseenCount}`
     const badgeSize = wide ? AGENDA_BADGE_SIZE_WIDE : AGENDA_BADGE_SIZE_COMPACT
@@ -2348,12 +2518,6 @@ function affinityLabel(sameAnswers: number, differentAnswers: number): AffinityP
  */
 const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }) => {
     const allConnections = getAllConnections()
-    const totalPages = Math.max(1, Math.ceil(allConnections.length / AGENDA_ROWS_PER_PAGE))
-    const pageStart = socialAgendaPage * AGENDA_ROWS_PER_PAGE
-    const pageEntries = allConnections.slice(pageStart, pageStart + AGENDA_ROWS_PER_PAGE)
-    const canGoPrevious = socialAgendaPage > 0
-    const canGoNext = socialAgendaPage < totalPages - 1
-
     /**
      * Panel sizing uses `isMobile()` directly - NOT the `compactUi` prop
      * (isMobile() || !wide) - deliberately different from every other use of
@@ -2367,6 +2531,72 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
      * that the panel is a fixed-aspect-ratio background image.
      */
     const isRealMobileDevice = isMobile()
+    /**
+     * A narrow/cramped DESKTOP window - NOT a real phone. Real-device
+     * feedback: at this combination, rows/text/affinity/tier/shared-answers/
+     * rounds were overlapping on BOTH pages at AGENDA_ROWS_PER_PAGE=4 - the
+     * same panel (AGENDA_PANEL_WIDTH_COMPACT/HEIGHT_COMPACT are literally
+     * identical to their _WIDE counterparts - this panel never resizes for
+     * desktop COMPACT) rendered at a much smaller absolute canvas scale than
+     * COMPACT was validated at, without a smaller-than-COMPACT font/row tier
+     * to fall back to. Rather than shrinking fonts further (risks legibility,
+     * the opposite of the goal), this reuses the exact same lever that
+     * already fixed the equivalent mobile overlap (6 -> 5 -> 4
+     * rows-per-page): fewer rows per page, same COMPACT fonts/spacing,
+     * unchanged.
+     *
+     * DETECTION, third pass: uses `getUiScale()` directly against a
+     * SocialAgenda-specific threshold (AGENDA_DESKTOP_NARROW_SCALE_THRESHOLD
+     * = 0.80), not WIDE_MIN_SCALE (0.65) and not the earlier width/height
+     * split (which was mathematically just WIDE_MIN_SCALE in disguise).
+     * Real-device measurement via the temp diagnostic label, taken exactly
+     * at the window size where rows visibly overlapped: uiScale = 0.728,
+     * width = 1398, height = 826 - both width and height were comfortably
+     * ABOVE the old 1248/702 breakpoints at that size, so that check
+     * reported "not narrow" at a size that was already broken. 0.65 (and
+     * its width/height-derived equivalents) is simply too low a bar FOR
+     * THIS SPECIFIC PANEL - AGENDA_PANEL_WIDTH_COMPACT/HEIGHT_COMPACT never
+     * shrink between WIDE/COMPACT the way most other panels in this file
+     * do, so it needs its own, higher threshold, not the shared one every
+     * other `wide`-driven decision in this file still correctly uses.
+     * `getUiScale()` is read fresh every render (this whole UI tree
+     * re-renders every frame - see setupUi), so resizing the window flips
+     * this immediately. Mobile (isRealMobileDevice true) and a desktop
+     * window genuinely at or above 0.80 are both unaffected either way.
+     *
+     * SECOND CAUSE (real-device evidence, a separate screenshot): even at a
+     * genuinely wide/tall window, the REVEAL banner ("NEW CONNECTION! ...
+     * joined your Social Agenda") is a normal (non-absolute) flex child that
+     * pushes every row below it down by its own real height (padding + 2
+     * text lines + margin-bottom - see its own JSX a few hundred lines
+     * below) - AGENDA_ROWS_PER_PAGE=4 was sized for the safe area WITHOUT
+     * that banner ever eating into it. `hasAgendaBanner` reuses
+     * agendaRevealedConnectionIds.length > 0 - the EXACT existing state
+     * that already controls the banner's own visibility (see its own JSX) -
+     * never a new/duplicated flag. Desktop-only (mobile is completely
+     * unaffected - `hasAgendaBanner` is always false there), same
+     * `!isRealMobileDevice` gate as isDesktopNarrow.
+     */
+    const isDesktopNarrow = !isRealMobileDevice && getUiScale() < AGENDA_DESKTOP_NARROW_SCALE_THRESHOLD
+    const hasAgendaBanner = !isRealMobileDevice && agendaRevealedConnectionIds.length > 0
+    const rowsPerPage = isDesktopNarrow || hasAgendaBanner ? AGENDA_ROWS_PER_PAGE_DESKTOP_NARROW : AGENDA_ROWS_PER_PAGE
+    const totalPages = Math.max(1, Math.ceil(allConnections.length / rowsPerPage))
+    // Clamp for when rowsPerPage (and so totalPages) shrinks out from under the
+    // page the user is already on - narrow/banner toggling on or off mid-view.
+    // A direct reassignment of the same module-level `let` socialAgendaPage
+    // already used everywhere else in this component (see its own declaration),
+    // not React state - this whole tree re-renders every frame regardless (see
+    // setupUi), so this needs no extra effect/rerender trigger, and it's a no-op
+    // once the page is back in range (only ever lowers it, never bumps a still-
+    // valid page).
+    if (socialAgendaPage > totalPages - 1) {
+        socialAgendaPage = Math.max(0, totalPages - 1)
+    }
+    const pageStart = socialAgendaPage * rowsPerPage
+    const pageEntries = allConnections.slice(pageStart, pageStart + rowsPerPage)
+    const canGoPrevious = socialAgendaPage > 0
+    const canGoNext = socialAgendaPage < totalPages - 1
+
     const panelSize = isRealMobileDevice
         ? getMobileAgendaPanelSize()
         : {
@@ -2425,7 +2655,7 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                         />
                     </UiEntity>
                 ) : (
-                    <UiEntity uiTransform={{ flexDirection: 'column', width: '100%' }}>
+                    <UiEntity uiTransform={{ flexDirection: 'column', width: '100%', height: isDesktopNarrow ? '100%' : undefined }}>
                         <Label
                             value={`${allConnections.length} CONNECTION${allConnections.length === 1 ? '' : 'S'}`}
                             fontSize={AGENDA_COUNT_FONT_SIZE}
@@ -2488,9 +2718,24 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             const isNewRow = agendaRevealedConnectionIds.includes(connection.otherUserId.toLowerCase())
                             const level = getFriendshipLevel(connection.roundsTogether)
                             const affinity = affinityLabel(connection.sameAnswers, connection.differentAnswers)
-                            const nameFontSize = compactUi ? AGENDA_NAME_FONT_SIZE_COMPACT : AGENDA_NAME_FONT_SIZE_WIDE
-                            const secondaryFontSize = compactUi ? AGENDA_SECONDARY_FONT_SIZE_COMPACT : AGENDA_SECONDARY_FONT_SIZE_WIDE
-                            const tertiaryFontSize = compactUi ? AGENDA_TERTIARY_FONT_SIZE_COMPACT : AGENDA_TERTIARY_FONT_SIZE_WIDE
+                            // Mobile gets its own (slightly larger) tier, checked before compactUi -
+                            // see AGENDA_NAME_FONT_SIZE_MOBILE's own doc comment for why this is a
+                            // separate real-device signal, not a change to the compactUi tier itself.
+                            const nameFontSize = isRealMobileDevice
+                                ? AGENDA_NAME_FONT_SIZE_MOBILE
+                                : compactUi
+                                  ? AGENDA_NAME_FONT_SIZE_COMPACT
+                                  : AGENDA_NAME_FONT_SIZE_WIDE
+                            const secondaryFontSize = isRealMobileDevice
+                                ? AGENDA_SECONDARY_FONT_SIZE_MOBILE
+                                : compactUi
+                                  ? AGENDA_SECONDARY_FONT_SIZE_COMPACT
+                                  : AGENDA_SECONDARY_FONT_SIZE_WIDE
+                            const tertiaryFontSize = isRealMobileDevice
+                                ? AGENDA_TERTIARY_FONT_SIZE_MOBILE
+                                : compactUi
+                                  ? AGENDA_TERTIARY_FONT_SIZE_COMPACT
+                                  : AGENDA_TERTIARY_FONT_SIZE_WIDE
                             const isLastOnPage = index === pageEntries.length - 1
                             const avatarSize = compactUi ? AGENDA_AVATAR_SIZE_COMPACT : AGENDA_AVATAR_SIZE_WIDE
                             const avatarGap = compactUi ? AGENDA_AVATAR_GAP_COMPACT : AGENDA_AVATAR_GAP_WIDE
@@ -2595,11 +2840,24 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                                 <Label
                                                     value={affinity.primary}
                                                     fontSize={secondaryFontSize}
-                                                    color={affinity.secondary ? AGENDA_PINK : CREAM_PANEL_TEXT_MUTED}
+                                                    color={
+                                                        affinity.secondary
+                                                            ? isRealMobileDevice
+                                                                ? AGENDA_MOBILE_AFFINITY_COLOR
+                                                                : AGENDA_PINK
+                                                            : isRealMobileDevice
+                                                              ? AGENDA_MOBILE_MUTED_COLOR
+                                                              : CREAM_PANEL_TEXT_MUTED
+                                                    }
                                                     textWrap="wrap"
                                                 />
                                                 {affinity.secondary && (
-                                                    <Label value={` · ${affinity.secondary}`} fontSize={secondaryFontSize} color={CREAM_PANEL_TEXT_MUTED} textWrap="wrap" />
+                                                    <Label
+                                                        value={` · ${affinity.secondary}`}
+                                                        fontSize={secondaryFontSize}
+                                                        color={isRealMobileDevice ? AGENDA_MOBILE_MUTED_COLOR : CREAM_PANEL_TEXT_MUTED}
+                                                        textWrap="wrap"
+                                                    />
                                                 )}
                                             </UiEntity>
                                             {/* Line 3: Friendship level (teal, its own bit of personality) +
@@ -2607,12 +2865,21 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                                                 brand new Connection has none yet, same as before). */}
                                             {level !== null && (
                                                 <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 4 } }}>
-                                                    <Label value={`✦ ${level}`} fontSize={tertiaryFontSize} color={AGENDA_TEAL} textWrap="wrap" />
-                                                    <Label value=" · " fontSize={tertiaryFontSize} color={CREAM_PANEL_TEXT_MUTED} />
+                                                    <Label
+                                                        value={`✦ ${level}`}
+                                                        fontSize={tertiaryFontSize}
+                                                        color={isRealMobileDevice ? AGENDA_MOBILE_TIER_COLOR : AGENDA_TEAL}
+                                                        textWrap="wrap"
+                                                    />
+                                                    <Label
+                                                        value=" · "
+                                                        fontSize={tertiaryFontSize}
+                                                        color={isRealMobileDevice ? AGENDA_MOBILE_MUTED_COLOR : CREAM_PANEL_TEXT_MUTED}
+                                                    />
                                                     <Label
                                                         value={`${connection.roundsTogether} ROUND${connection.roundsTogether === 1 ? '' : 'S'}`}
                                                         fontSize={tertiaryFontSize}
-                                                        color={CREAM_PANEL_TEXT_MUTED}
+                                                        color={isRealMobileDevice ? AGENDA_MOBILE_MUTED_COLOR : CREAM_PANEL_TEXT_MUTED}
                                                         textWrap="wrap"
                                                     />
                                                 </UiEntity>
@@ -2629,8 +2896,26 @@ const SocialAgenda = ({ wide, compactUi }: { wide: boolean; compactUi: boolean }
                             )
                         })}
 
+                        {/* Desktop-narrow only: absorbs all leftover vertical space in the now
+                            height:'100%' content column, pushing the PREV/NEXT strip down into
+                            its own block at the bottom of the safe area instead of sitting
+                            directly under the last row. minHeight guarantees a real gap even
+                            when the page is full and there's little space left to absorb. Wide/
+                            mobile render nothing here - unchanged from before this fix. */}
+                        {isDesktopNarrow && <UiEntity uiTransform={{ width: '100%', flexGrow: 1, minHeight: AGENDA_DESKTOP_NARROW_FOOTER_MIN_GAP }} />}
+
                         {totalPages > 1 && (
-                            <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', margin: { top: 8 } }}>
+                            <UiEntity
+                                uiTransform={{
+                                    width: '100%',
+                                    flexDirection: 'row',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    margin: isDesktopNarrow
+                                        ? { top: 8, bottom: AGENDA_DESKTOP_NARROW_FOOTER_BOTTOM_MARGIN }
+                                        : { top: AGENDA_FOOTER_TOP_MARGIN }
+                                }}
+                            >
                                 {/* "Tab"-styled pagination pills - soft pink wash, rounded like the pastel
                                     tabs on the illustrated panel's own right edge, code-only (no new asset). */}
                                 <UiEntity
