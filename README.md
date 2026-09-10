@@ -235,6 +235,15 @@ Then walk into the Quest Zone and meet another player to begin.
 
 ---
 
+## 📄 License
+
+The source code of Social Quest is released under the [MIT License](LICENSE).
+
+Visual assets and third-party materials may be subject to separate terms.
+See [ASSETS.md](ASSETS.md) for details.
+
+---
+
 ## 💗 Social Quest
 
 **Meet. Play. Connect. Remember.**
