@@ -255,6 +255,32 @@ const WIDE_MIN_SCALE = 0.65
  */
 const HUD_TOP_MARGIN = 10
 
+/**
+ * Mobile-only (isMobile() real device, never a small desktop preview window -
+ * same isRealMobileDevice signal as SocialAgenda's own, computed once in
+ * uiMenu and reused for the HUD row + the questions panel below) right-edge
+ * inset for the relocated top-right HUD cluster. Desktop keeps the existing
+ * centered two-slot row entirely untouched - see uiMenu's own isRealMobileDevice
+ * branch for both JSX paths.
+ */
+const HUD_MOBILE_RIGHT_MARGIN = 16
+
+/**
+ * Conservative mobile-only shrink factor for the "questions panel" (the
+ * decorative SOCIAL_QUEST_PANEL_BACKGROUND image plus its inner
+ * GAMEPLAY_PANEL / WAITING_PANEL / LOBBY_PANEL_HEIGHT content box) - per
+ * explicit feedback that this panel is too large on a real phone screen.
+ * Applied uniformly to both the outer background (height-driven, aspect-ratio
+ * preserved automatically - see getSocialQuestPanelBackgroundSize) and the
+ * inner content box's own width/height, so the existing fit between the two
+ * (already correct at every WIDE/COMPACT tier today) is preserved exactly,
+ * just at a smaller absolute scale. Gated on isMobile() alone, never
+ * `compact` - a narrow desktop preview window must keep today's COMPACT size.
+ * Bumped 0.72 -> 0.82 per real-device feedback that the first mobile pass
+ * shrank this panel too far.
+ */
+const GAMEPLAY_MOBILE_SCALE = 0.82
+
 /** Extra vertical separation nudge between the CONNECTIONS pill above and the JOIN panel below it - JOIN only, per real-device feedback that they sat too close together. Every other phase's panel position is untouched. */
 const JOIN_EXTRA_TOP_MARGIN = 16
 
@@ -478,8 +504,15 @@ const AGENDA_SAFE_AREA_HEIGHT_PERCENT = '56%'
  * "contain fit" logic getUiScale() itself already uses for the whole scene),
  * and (b) always preserves SOCIAL_AGENDA_PANEL_ASPECT_RATIO exactly.
  */
-const AGENDA_MOBILE_WIDTH_FRACTION = 0.65
-const AGENDA_MOBILE_MAX_HEIGHT_FRACTION = 0.7
+/**
+ * Bumped 0.44/0.48 -> 0.54/0.60 per real-device feedback that the first
+ * mobile pass shrank this panel too far. Same contain-fit computation below,
+ * untouched - only these two source fractions changed. (History: originally
+ * 0.65/0.7, then 0.44/0.48 per "~65-70% of current size" feedback which
+ * proved too aggressive once actually seen on a phone.)
+ */
+const AGENDA_MOBILE_WIDTH_FRACTION = 0.54
+const AGENDA_MOBILE_MAX_HEIGHT_FRACTION = 0.6
 
 function getMobileAgendaPanelSize(): { width: number; height: number } {
     const canvasInfo = UiCanvasInformation.getOrNull(engine.RootEntity)
@@ -578,7 +611,7 @@ const AGENDA_ROW_DIVIDER_COLOR = Color4.create(AGENDA_PINK.r, AGENDA_PINK.g, AGE
  * throughout this file is the reliable choice here, per the explicit
  * "reliability over sophistication" guidance for this feature.
  */
-const AGENDA_ROWS_PER_PAGE = 6
+const AGENDA_ROWS_PER_PAGE = 4
 
 /**
  * Maximum names shown per RESULT option column before collapsing the rest into
@@ -789,15 +822,23 @@ const SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_COMPACT = 640
 const SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_WIDE = 520
 const SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_COMPACT = 440
 
-/** `showingGameplayPanel` - true ONLY for COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT (see this constant block's own doc comment); false (the "lobby" tier) for JOIN/WAITING/PREPARING/AFK messages. */
-function getSocialQuestPanelBackgroundSize(showingGameplayPanel: boolean, compact: boolean): { width: number; height: number } {
-    const height = showingGameplayPanel
+/**
+ * `showingGameplayPanel` - true ONLY for COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT
+ * (see this constant block's own doc comment); false (the "lobby" tier) for JOIN/WAITING/
+ * PREPARING/AFK messages. `isRealMobileDevice` (bare isMobile(), NOT `compact` - see
+ * GAMEPLAY_MOBILE_SCALE's own doc comment) additionally shrinks the COMPACT-tier height by
+ * GAMEPLAY_MOBILE_SCALE on a real phone only - width is re-derived from that same shrunk
+ * height via SOCIAL_QUEST_PANEL_BACKGROUND_ASPECT_RATIO, so the aspect ratio is never at risk.
+ */
+function getSocialQuestPanelBackgroundSize(showingGameplayPanel: boolean, compact: boolean, isRealMobileDevice: boolean): { width: number; height: number } {
+    const baseHeight = showingGameplayPanel
         ? compact
             ? SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_COMPACT
             : SOCIAL_QUEST_PANEL_BACKGROUND_GAMEPLAY_HEIGHT_WIDE
         : compact
           ? SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_COMPACT
           : SOCIAL_QUEST_PANEL_BACKGROUND_LOBBY_HEIGHT_WIDE
+    const height = isRealMobileDevice ? baseHeight * GAMEPLAY_MOBILE_SCALE : baseHeight
     return { width: height * SOCIAL_QUEST_PANEL_BACKGROUND_ASPECT_RATIO, height }
 }
 
@@ -1119,6 +1160,16 @@ export const uiMenu = () => {
      */
     const compact = isMobile() || !wide
     /**
+     * Bare isMobile() (real device only, never a narrow desktop preview window)
+     * - reused below for (a) the top-right HUD relocation and (b) the questions
+     * panel's mobile shrink. Deliberately a different signal from `compact`
+     * (which is also true for a small desktop window): both this task's HUD
+     * repositioning and panel shrinking are explicitly real-phone-only, with
+     * desktop required to stay pixel-identical to today - same reasoning as
+     * SocialAgenda's own isRealMobileDevice.
+     */
+    const isRealMobileDevice = isMobile()
+    /**
      * COUNTDOWN/ANSWERING/ANSWER LOCKED/REVEALING/RESULT - the phases that
      * share the fixed GAMEPLAY_PANEL_HEIGHT_* shell AND the bigger
      * "gameplay" panel-background tier (see its own doc comment). COUNTDOWN
@@ -1213,12 +1264,16 @@ export const uiMenu = () => {
         }
     }
     const activeSocialPointsReward = getActiveSocialPointsReward()
-    const socialQuestPanelBackgroundSize = getSocialQuestPanelBackgroundSize(showingGameplayPanel, compact)
+    const socialQuestPanelBackgroundSize = getSocialQuestPanelBackgroundSize(showingGameplayPanel, compact, isRealMobileDevice)
 
     return (
         // Keeps the panel clear of the device notch, status bar and rounded corners on mobile
         <ScreenInsetArea>
-            {/* Persistent Social HUD + temporary celebrations, upper-center: real Explorer
+            {/* DESKTOP ONLY (isRealMobileDevice false) - byte-identical to the pre-existing
+                layout, per explicit "desktop queda exactamente como está" instruction. See
+                the mobile branch just below for the top-right relocation on a real phone.
+
+                Persistent Social HUD + temporary celebrations, upper-center: real Explorer
                 testing showed all four corners are native-UI territory (Explorer controls
                 top-left/top-right, chat bottom-left, other controls bottom-right), so this is
                 the one region confirmed visually clear. Sits HUD_TOP_MARGIN below the safe-area
@@ -1234,72 +1289,124 @@ export const uiMenu = () => {
                 widths are fixed regardless of content, Connections' anchor can never shift when
                 a celebration appears or disappears - unlike centering the pair as a single
                 group, which moved Connections depending on the celebration's width. */}
-            <UiEntity
-                uiTransform={{
-                    positionType: 'absolute',
-                    position: { top: HUD_TOP_MARGIN },
-                    width: '100%',
-                    flexDirection: 'row',
-                    alignItems: 'flex-start'
-                }}
-            >
-                <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
-                    {/* Fixed HUD group [ AGENDA ][ LEADERBOARD ][ SP COUNTER ], always visible
-                        on every platform and in every phase (including ANSWERING/ANSWER
-                        LOCKED) - same fixed position and same three elements throughout, never
-                        hidden, reordered, or moved. Connections' own count is no longer
-                        duplicated here as a separate indicator - Social Agenda is the one place
-                        that shows it ("N CONNECTIONS", see its own header). SocialAgendaButton's
-                        tap is disabled (no-op) during ANSWERING/ANSWER LOCKED - see its own doc
-                        comment - so the player can never cover the question or lose response
-                        time. SocialPointsCounter has no tap handler at all, same reasoning as
-                        the retired Connections pill. */}
+            {!isRealMobileDevice && (
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { top: HUD_TOP_MARGIN },
+                        width: '100%',
+                        flexDirection: 'row',
+                        alignItems: 'flex-start'
+                    }}
+                >
+                    <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-end' }}>
+                        {/* Fixed HUD group [ AGENDA ][ LEADERBOARD ][ SP COUNTER ], always visible
+                            on every platform and in every phase (including ANSWERING/ANSWER
+                            LOCKED) - same fixed position and same three elements throughout, never
+                            hidden, reordered, or moved. Connections' own count is no longer
+                            duplicated here as a separate indicator - Social Agenda is the one place
+                            that shows it ("N CONNECTIONS", see its own header). SocialAgendaButton's
+                            tap is disabled (no-op) during ANSWERING/ANSWER LOCKED - see its own doc
+                            comment - so the player can never cover the question or lose response
+                            time. SocialPointsCounter has no tap handler at all, same reasoning as
+                            the retired Connections pill. */}
+                        <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <SocialAgendaButton wide={wide} />
+                            <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
+                            <LeaderboardButton wide={wide} onOpen={() => { socialAgendaOpen = false }} />
+                            <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
+                            <SocialPointsCounter wide={wide} />
+                            {/* Absolutely positioned within THIS row - flush to its bottom-right
+                                corner, roughly under the counter - so it never affects the row's
+                                own flex layout (Agenda/Leaderboard/Counter never shift because of
+                                it). Always VALID_ROUND now - socialPointsFeedback.ts's own
+                                presentationQueue never queues a FRIENDSHIP_BONUS reward anymore
+                                (that bonus shows inline inside NewConnectionToast/FriendshipToast
+                                instead - see their own doc comments), so getActiveSocialPointsReward()
+                                can only ever return one of those here. First-pass placement only,
+                                per explicit instruction to validate timing/queue/counter-increment/
+                                animation before any visual polish. */}
+                            {activeSocialPointsReward && <SocialPointsValidRoundToast data={activeSocialPointsReward} wide={wide} />}
+                        </UiEntity>
+                    </UiEntity>
+                    {/* Compact toast presentation for the right slot on every platform - the large
+                        cards felt unnecessarily obtrusive and were retired (see ui.tsx history).
+                        `wide` still only affects the gap width here, never which presentation is
+                        chosen. */}
+                    <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
+                        {presentedNewConnection && (
+                            // pointerFilter:'none' - purely informational, must never intercept clicks meant for the HUD buttons beneath/around it (same principle already proven on SocialPointsValidRoundToast).
+                            <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
+                                <NewConnectionToast
+                                    data={presentedNewConnection}
+                                    presentation={getActiveCelebrationPresentation(presentedNewConnection)}
+                                    wide={wide}
+                                />
+                            </UiEntity>
+                        )}
+                        {presentedFriendship && (
+                            // pointerFilter:'none' - same reasoning as the NewConnectionToast wrapper above.
+                            <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
+                                <FriendshipToast
+                                    data={presentedFriendship}
+                                    presentation={getActiveCelebrationPresentation(presentedFriendship)}
+                                    wide={wide}
+                                />
+                            </UiEntity>
+                        )}
+                    </UiEntity>
+                </UiEntity>
+            )}
+            {/* MOBILE ONLY (isRealMobileDevice) - same three elements (Agenda/Leaderboard/SP
+                Counter) and the same SocialPointsValidRoundToast/celebration toasts as the
+                desktop row above, relocated to the top-right corner per explicit instruction:
+                on a real phone, top-left is avatar/chat/compass and bottom-right is the native
+                E/F/jump/hand controls, leaving top-right free. Stacked in a column (button row,
+                then any active celebration toast below it, right-aligned) rather than the
+                desktop's two-slot row - a horizontal right-slot toast would run back into the
+                relocated buttons instead of away from them the way it does on desktop. Nothing
+                is hidden here - every element desktop shows is still shown, just repositioned. */}
+            {isRealMobileDevice && (
+                <UiEntity
+                    uiTransform={{
+                        positionType: 'absolute',
+                        position: { top: HUD_TOP_MARGIN, right: HUD_MOBILE_RIGHT_MARGIN },
+                        flexDirection: 'column',
+                        alignItems: 'flex-end'
+                    }}
+                >
                     <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
                         <SocialAgendaButton wide={wide} />
                         <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <LeaderboardButton wide={wide} onOpen={() => { socialAgendaOpen = false }} />
                         <UiEntity uiTransform={{ width: SOCIAL_HUD_GROUP_GAP }} />
                         <SocialPointsCounter wide={wide} />
-                        {/* Absolutely positioned within THIS row - flush to its bottom-right
-                            corner, roughly under the counter - so it never affects the row's
-                            own flex layout (Agenda/Leaderboard/Counter never shift because of
-                            it). Always VALID_ROUND now - socialPointsFeedback.ts's own
-                            presentationQueue never queues a FRIENDSHIP_BONUS reward anymore
-                            (that bonus shows inline inside NewConnectionToast/FriendshipToast
-                            instead - see their own doc comments), so getActiveSocialPointsReward()
-                            can only ever return one of those here. First-pass placement only,
-                            per explicit instruction to validate timing/queue/counter-increment/
-                            animation before any visual polish. */}
                         {activeSocialPointsReward && <SocialPointsValidRoundToast data={activeSocialPointsReward} wide={wide} />}
                     </UiEntity>
-                </UiEntity>
-                {/* Compact toast presentation for the right slot on every platform - the large
-                    cards felt unnecessarily obtrusive and were retired (see ui.tsx history).
-                    `wide` still only affects the gap width here, never which presentation is
-                    chosen. */}
-                <UiEntity uiTransform={{ width: '50%', flexDirection: 'row', justifyContent: 'flex-start' }}>
-                    {presentedNewConnection && (
-                        // pointerFilter:'none' - purely informational, must never intercept clicks meant for the HUD buttons beneath/around it (same principle already proven on SocialPointsValidRoundToast).
-                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
-                            <NewConnectionToast
-                                data={presentedNewConnection}
-                                presentation={getActiveCelebrationPresentation(presentedNewConnection)}
-                                wide={wide}
-                            />
-                        </UiEntity>
-                    )}
-                    {presentedFriendship && (
-                        // pointerFilter:'none' - same reasoning as the NewConnectionToast wrapper above.
-                        <UiEntity uiTransform={{ margin: { left: wide ? WIDE_ROW_GAP : COMPACT_ROW_GAP }, pointerFilter: 'none' }}>
-                            <FriendshipToast
-                                data={presentedFriendship}
-                                presentation={getActiveCelebrationPresentation(presentedFriendship)}
-                                wide={wide}
-                            />
+                    {(presentedNewConnection || presentedFriendship) && (
+                        <UiEntity uiTransform={{ flexDirection: 'column', alignItems: 'flex-end', margin: { top: COMPACT_ROW_GAP } }}>
+                            {presentedNewConnection && (
+                                <UiEntity uiTransform={{ pointerFilter: 'none' }}>
+                                    <NewConnectionToast
+                                        data={presentedNewConnection}
+                                        presentation={getActiveCelebrationPresentation(presentedNewConnection)}
+                                        wide={wide}
+                                    />
+                                </UiEntity>
+                            )}
+                            {presentedFriendship && (
+                                <UiEntity uiTransform={{ pointerFilter: 'none', margin: { top: presentedNewConnection ? COMPACT_ROW_GAP : 0 } }}>
+                                    <FriendshipToast
+                                        data={presentedFriendship}
+                                        presentation={getActiveCelebrationPresentation(presentedFriendship)}
+                                        wide={wide}
+                                    />
+                                </UiEntity>
+                            )}
                         </UiEntity>
                     )}
                 </UiEntity>
-            </UiEntity>
+            )}
 
             <UiEntity
                 uiTransform={{
@@ -1350,8 +1457,12 @@ export const uiMenu = () => {
                                 untouched. */}
                             <UiEntity
                                 uiTransform={{
-                                    width: showingGameplayPanel ? GAMEPLAY_PANEL_WIDTH : WAITING_PANEL_WIDTH,
-                                    height: showingGameplayPanel ? (compact ? GAMEPLAY_PANEL_HEIGHT_COMPACT : GAMEPLAY_PANEL_HEIGHT_WIDE) : LOBBY_PANEL_HEIGHT,
+                                    width:
+                                        (showingGameplayPanel ? GAMEPLAY_PANEL_WIDTH : WAITING_PANEL_WIDTH) *
+                                        (isRealMobileDevice ? GAMEPLAY_MOBILE_SCALE : 1),
+                                    height:
+                                        (showingGameplayPanel ? (compact ? GAMEPLAY_PANEL_HEIGHT_COMPACT : GAMEPLAY_PANEL_HEIGHT_WIDE) : LOBBY_PANEL_HEIGHT) *
+                                        (isRealMobileDevice ? GAMEPLAY_MOBILE_SCALE : 1),
                                     padding: showingGameplayPanel ? GAMEPLAY_PANEL_PADDING : WAITING_PANEL_PADDING,
                                     flexDirection: 'column',
                                     // Lobby only: centers JOIN/WAITING/PREPARING/AFK content vertically

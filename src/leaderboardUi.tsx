@@ -1,5 +1,7 @@
 import ReactEcs, { Label, UiEntity } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
+import { engine, UiCanvasInformation } from '@dcl/sdk/ecs'
+import { isMobile } from '@dcl/sdk/platform'
 import { roundManager } from './roundManager'
 import { requestLeaderboard, getLatestLeaderboardResponse, LeaderboardResponse } from './leaderboardNetwork'
 import { LeaderboardRankedEntry } from './leaderboardRanking'
@@ -88,6 +90,45 @@ const LEADERBOARD_PANEL_WIDTH_WIDE = 740
 const LEADERBOARD_PANEL_HEIGHT_WIDE = 555
 const LEADERBOARD_PANEL_WIDTH_COMPACT = 640
 const LEADERBOARD_PANEL_HEIGHT_COMPACT = 480
+
+/** Own copy of ui.tsx's VIRTUAL_WIDTH/VIRTUAL_HEIGHT (not exported there) - same
+ * duplication precedent as this file's own CREAM/SOCIAL_PINK/TEAL_ACCENT palette
+ * being copied into ui.tsx rather than imported: a one-way dependency (this file
+ * has none on ui.tsx) is worth two constants staying in sync manually. Must match
+ * the ReactEcsRenderer.setUiRenderer(...) call in ui.tsx's setupUi(). */
+const VIRTUAL_WIDTH = 1920
+const VIRTUAL_HEIGHT = 1080
+
+/**
+ * Real-mobile-device sizing (isMobile() only, never the `wide` canvas-scale
+ * signal - same isRealMobileDevice distinction ui.tsx's own SocialAgenda makes,
+ * and for the same reason: this panel is a fixed-aspect-ratio background image
+ * via LEADERBOARD_PANEL_ASPECT_RATIO, so a plain percentage width/maxHeight pair
+ * would deform it). Same contain-fit computation as getMobileAgendaPanelSize
+ * (whichever candidate is smaller respects both bounds with zero deformation).
+ * Bumped 0.24/0.32 -> 0.30/0.40 per real-device feedback that the first mobile
+ * pass shrank this panel too far. (History: derived from (640/1920)*0.72=0.24,
+ * (480/1080)*0.72=0.32 per "~70-75% of current size" feedback, which proved
+ * too aggressive once actually seen on a phone.)
+ */
+const LEADERBOARD_MOBILE_WIDTH_FRACTION = 0.3
+const LEADERBOARD_MOBILE_MAX_HEIGHT_FRACTION = 0.4
+
+function getMobileLeaderboardPanelSize(): { width: number; height: number } {
+    const canvasInfo = UiCanvasInformation.getOrNull(engine.RootEntity)
+    const scale = canvasInfo ? Math.min(canvasInfo.width / VIRTUAL_WIDTH, canvasInfo.height / VIRTUAL_HEIGHT) : 0
+    if (!canvasInfo || scale <= 0) {
+        // No live canvas data yet - fall back to the fixed COMPACT size rather than 0/NaN.
+        return { width: LEADERBOARD_PANEL_WIDTH_COMPACT, height: LEADERBOARD_PANEL_HEIGHT_COMPACT }
+    }
+    const widthDrivenWidth = (canvasInfo.width * LEADERBOARD_MOBILE_WIDTH_FRACTION) / scale
+    const widthDrivenHeight = widthDrivenWidth / LEADERBOARD_PANEL_ASPECT_RATIO
+    const heightDrivenHeight = (canvasInfo.height * LEADERBOARD_MOBILE_MAX_HEIGHT_FRACTION) / scale
+    const heightDrivenWidth = heightDrivenHeight * LEADERBOARD_PANEL_ASPECT_RATIO
+    return widthDrivenHeight <= heightDrivenHeight
+        ? { width: widthDrivenWidth, height: widthDrivenHeight }
+        : { width: heightDrivenWidth, height: heightDrivenHeight }
+}
 
 /**
  * Safe area for dynamic content - the pixel-sampled cream rectangle
@@ -379,11 +420,20 @@ export const LeaderboardPanel = ({ wide }: { wide: boolean }) => {
         leaderboardOpen = false
     }
 
+    // isMobile() directly, not the `wide` prop - see getMobileLeaderboardPanelSize's own doc comment.
+    const isRealMobileDevice = isMobile()
+    const panelSize = isRealMobileDevice
+        ? getMobileLeaderboardPanelSize()
+        : {
+              width: wide ? LEADERBOARD_PANEL_WIDTH_WIDE : LEADERBOARD_PANEL_WIDTH_COMPACT,
+              height: wide ? LEADERBOARD_PANEL_HEIGHT_WIDE : LEADERBOARD_PANEL_HEIGHT_COMPACT
+          }
+
     return (
         <UiEntity
             uiTransform={{
-                width: wide ? LEADERBOARD_PANEL_WIDTH_WIDE : LEADERBOARD_PANEL_WIDTH_COMPACT,
-                height: wide ? LEADERBOARD_PANEL_HEIGHT_WIDE : LEADERBOARD_PANEL_HEIGHT_COMPACT
+                width: panelSize.width,
+                height: panelSize.height
             }}
             uiBackground={{ texture: { src: LEADERBOARD_PANEL_PATH }, textureMode: 'stretch' }}
         >

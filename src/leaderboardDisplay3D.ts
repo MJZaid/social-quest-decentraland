@@ -361,18 +361,34 @@ const SP_COLUMN_WIDTH = 0.8
  * Same orientation rule as the Social Points columns above: a POSITIVE
  * offset from SCREEN_CENTER_X renders on the visual LEFT. PAIR_HEART_X is
  * therefore positive (renders left-of-true-center, matching the mockup's
- * "names cluster left, affinity far right"). NameA needs to render LEFT of
- * the heart (further into positive-offset territory) with TAM_MIDDLE_RIGHT
- * (ends near the heart, grows further left/safe, away from the heart).
- * NameB needs to render RIGHT of the heart (less-positive/more-negative
- * offset) with TAM_MIDDLE_LEFT (starts near the heart, grows further
- * right/safe, away from the heart). PAIR_NAME_GAP was widened from the
- * previous pass's 0.1 (too tight - names visually ran into the heart,
- * reading as one fused word) to give real breathing room on both sides.
+ * "names cluster left, affinity far right").
+ *
+ * NameA ANCHOR/ALIGNMENT FIX (real-production evidence: WEEKLY's "Echo
+ * Nightwing" and ALL-TIME's "HEAVENYEAH" both ran off the panel's left edge -
+ * shared by both sections, since both go through this same createMatchSection).
+ * The previous approach anchored nameA close to the heart (PAIR_HEART_X +
+ * PAIR_NAME_GAP) with TAM_MIDDLE_RIGHT, which - per this same file's own
+ * proven RANK_COLUMN_X/SP_COLUMN_X convention above - grows OUTWARD (further
+ * left, toward/past the panel's real edge) as a name gets longer: exactly
+ * backwards for a left-side element. PAIR_NAME_A_X now anchors instead at a
+ * fixed safe distance in from the panel's actual left edge (derived from
+ * TEXT_WIDTH/SCREEN_CENTER_X, the same outer bound RANK/TITLE already stay
+ * inside), paired with TAM_MIDDLE_LEFT - the same "grows right/inward, safe"
+ * pattern already proven by RANK_COLUMN_X. A long name now grows TOWARD the
+ * heart (inward) from a start point that can never itself be past the edge,
+ * structurally eliminating the left-edge overflow regardless of name length.
+ * Dynamic font sizing (ALL-TIME only, see computeAllTimeNameFontSize) stays
+ * as an additional safety net for extreme cases, not the primary fix anymore.
+ *
+ * NameB is completely UNCHANGED - still PAIR_HEART_X - PAIR_NAME_GAP with
+ * TAM_MIDDLE_LEFT, growing right/away from the heart into the panel's own
+ * right-side room, per explicit instruction not to touch it.
  */
 const PAIR_HEART_X = SCREEN_CENTER_X + 0.35
 const PAIR_NAME_GAP = 0.28
-const PAIR_NAME_A_X = PAIR_HEART_X + PAIR_NAME_GAP
+/** How far in from the panel's real left edge (SCREEN_CENTER_X + TEXT_WIDTH/2, the same outer bound RANK/TITLE text already respects) nameA's anchor sits - see this block's own doc comment for why this replaces the old heart-relative anchor. */
+const PAIR_NAME_A_LEFT_MARGIN = 0.15
+const PAIR_NAME_A_X = SCREEN_CENTER_X + TEXT_WIDTH / 2 - PAIR_NAME_A_LEFT_MARGIN
 const PAIR_NAME_B_X = PAIR_HEART_X - PAIR_NAME_GAP
 const PAIR_AFFINITY_X = SP_COLUMN_X
 const PAIR_NAME_WIDTH = 1.1
@@ -579,7 +595,7 @@ function createTitlePlate(parent: Entity): Entity {
 function createMatchSection(parent: Entity, titleY: number, pairY: number, sharedY: number, titleColor: Color4): MatchSectionEntities {
     return {
         titleText: createTextEntity(parent, SCREEN_CENTER_X, titleY, MATCH_TITLE_FONT_SIZE, titleColor, TextAlignMode.TAM_MIDDLE_CENTER, TEXT_WIDTH),
-        nameA: createTextEntity(parent, PAIR_NAME_A_X, pairY, NAME_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, PAIR_NAME_WIDTH),
+        nameA: createTextEntity(parent, PAIR_NAME_A_X, pairY, NAME_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_LEFT, PAIR_NAME_WIDTH),
         heart: createTextEntity(parent, PAIR_HEART_X, pairY, MATCH_PAIR_HEART_FONT_SIZE, MATCH_HEART_COLOR, TextAlignMode.TAM_MIDDLE_CENTER, PAIR_HEART_WIDTH),
         nameB: createTextEntity(parent, PAIR_NAME_B_X, pairY, NAME_FONT_SIZE, MATCH_NAME_COLOR, TextAlignMode.TAM_MIDDLE_LEFT, PAIR_NAME_WIDTH),
         affinity: createTextEntity(parent, PAIR_AFFINITY_X, pairY, MATCH_PAIR_FONT_SIZE, MATCH_AFFINITY_COLOR, TextAlignMode.TAM_MIDDLE_RIGHT, PAIR_AFFINITY_WIDTH),
@@ -679,6 +695,44 @@ function applySocialPoints(response: LeaderboardResponse | null, entities: Displ
 }
 
 /**
+ * nameA-only fix, now shared by BOTH WEEKLY and ALL-TIME (see their two
+ * applyMatchSection call sites in tick(), both now passing dynamicNameSizing
+ * = true with this exact same function/constants - one formula, not two).
+ * Originally ALL-TIME-only; widened after live testing showed WEEKLY's own
+ * "Echo Nightwing" (which had zero reduction before this pass) grew far
+ * enough inward, after the anchor/alignment fix, to have the heart glyph
+ * overlap its last letters - the anchor fix solved the left-edge overflow
+ * but a long enough nameA still needs SOME shrink to leave clear room before
+ * the heart. Never touches the shared NAME_FONT_SIZE constant (would also
+ * resize Social Points names) and never touches nameB (still full size,
+ * unchanged, per explicit instruction) - only nameA's own applied fontSize is
+ * scaled, per name, by its own length. Anchor/position (PAIR_NAME_A_X,
+ * TAM_MIDDLE_LEFT) are untouched from the previous pass.
+ *
+ * Retuned from the previous SAFE_LENGTH=8/PER_CHAR=0.035/MIN_SCALE=0.72
+ * (which only ever ran on ALL-TIME) because that combination was proven too
+ * weak once WEEKLY's 14-char "Echo Nightwing" was actually tested live -
+ * PER_CHAR raised to 0.045 and the floor lowered to 0.68 so a name that long
+ * shrinks enough to clear the heart with a small visible gap:
+ *   "Echo Nightwing" (14 chars): overflow=6, scale=max(0.68, 1-6*0.045=0.73)=0.73 -> fontSize ~0.80
+ *   "HEAVENYEAH" (10 chars): overflow=2, scale=max(0.68, 1-2*0.045=0.91)=0.91 -> fontSize ~1.00
+ *   names <= 8 chars: unchanged at the full 1.1
+ * This is a best-effort tuning, not a measured-glyph-width guarantee (this
+ * SDK's 3D TextShape exposes no text-measurement API) - re-check visually
+ * against the live mocks per this task's own instruction.
+ */
+const MATCH_NAME_A_SAFE_LENGTH = 8
+const MATCH_NAME_A_MIN_FONT_SCALE = 0.68
+const MATCH_NAME_A_SCALE_PER_CHAR = 0.045
+
+function computeMatchNameAFontSize(name: string): number {
+    if (name.length <= MATCH_NAME_A_SAFE_LENGTH) return NAME_FONT_SIZE
+    const overflowChars = name.length - MATCH_NAME_A_SAFE_LENGTH
+    const scale = Math.max(MATCH_NAME_A_MIN_FONT_SCALE, 1 - overflowChars * MATCH_NAME_A_SCALE_PER_CHAR)
+    return NAME_FONT_SIZE * scale
+}
+
+/**
  * Renders a section from its RESOLVED sticky display state (see
  * MatchSectionDisplay's own doc comment), never straight from a raw
  * response - the 'loading'/'empty'/'pair' distinction is already fully
@@ -690,8 +744,19 @@ function applySocialPoints(response: LeaderboardResponse | null, entities: Displ
  * baked into `rows` by the manager - an ineligible pair simply never
  * appears in `rows` at all, so a captured 'empty' state IS the correctly-
  * thresholded empty state, not something this function decides itself).
+ *
+ * `dynamicNameSizing` is now passed `true` from BOTH the WEEKLY and ALL-TIME
+ * call sites in tick() - see computeMatchNameAFontSize's own doc comment.
+ * Only ever applied to nameA (never nameB, never the shared NAME_FONT_SIZE
+ * constant itself).
  */
-function applyMatchSection(entities: MatchSectionEntities, display: MatchSectionDisplay, emptyPrimary: string, emptySecondary: string): void {
+function applyMatchSection(
+    entities: MatchSectionEntities,
+    display: MatchSectionDisplay,
+    emptyPrimary: string,
+    emptySecondary: string,
+    dynamicNameSizing: boolean = false
+): void {
     if (display.kind === 'loading') {
         setText(entities.nameA, '')
         setText(entities.heart, '')
@@ -716,6 +781,10 @@ function applyMatchSection(entities: MatchSectionEntities, display: MatchSection
 
     setText(entities.emptyPrimary, '')
     setText(entities.emptySecondary, '')
+    if (dynamicNameSizing) {
+        // nameA only - nameB stays at the shared NAME_FONT_SIZE, untouched, per explicit instruction.
+        TextShape.getMutable(entities.nameA).fontSize = computeMatchNameAFontSize(display.nameA)
+    }
     setText(entities.nameA, display.nameA)
     setText(entities.heart, HEART)
     setText(entities.nameB, display.nameB)
@@ -787,8 +856,8 @@ function tick(): void {
     lastAppliedFingerprint = fingerprint
 
     applySocialPoints(spResponse, entities)
-    applyMatchSection(entities.weekly, weeklyDisplay, WEEKLY_EMPTY_PRIMARY, WEEKLY_EMPTY_SECONDARY)
-    applyMatchSection(entities.allTime, allTimeDisplay, ALLTIME_EMPTY_PRIMARY, ALLTIME_EMPTY_SECONDARY)
+    applyMatchSection(entities.weekly, weeklyDisplay, WEEKLY_EMPTY_PRIMARY, WEEKLY_EMPTY_SECONDARY, true)
+    applyMatchSection(entities.allTime, allTimeDisplay, ALLTIME_EMPTY_PRIMARY, ALLTIME_EMPTY_SECONDARY, true)
 }
 
 /** Starts the permanent panel display. Idempotent (mirrors playerSessionManager.start()'s own guard) - safe even if called more than once. */
