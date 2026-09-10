@@ -4,7 +4,7 @@
 
 **Social Quest** is a mobile-first multiplayer social game for **Decentraland**. Players meet inside the Quest Zone, answer fun A/B questions together, discover how much they have in common, earn **Social Points**, and build persistent friendships over time.
 
-🌍 **Live World:** `socialquest.dcl.eth`  
+🌍 **Live World:** [Play Social Quest in Decentraland](https://decentraland.org/jump?realm=socialquest.dcl.eth&position=0,0&referrer=0xe339ebc7ec708bf42eed1b54a4df852312db2c5b)  
 📱 Designed and tested for **desktop and mobile**  
 🎮 Built with **Decentraland SDK7 + TypeScript**
 
@@ -174,7 +174,12 @@ The environment, interface, icons, 3D props, and interaction flow were created s
 
 ## 📸 Screenshots
 
-Gameplay, Social Agenda, mobile UI, and leaderboard screenshots will be added here before submission.
+Selected screenshots for the final submission:
+
+- Social Quest World / Quest Zone
+- Mobile gameplay
+- Social Agenda
+- Leaderboard
 
 ---
 
@@ -209,7 +214,7 @@ npm run build
 
 Open Decentraland and enter the World:
 
-**`socialquest.dcl.eth`**
+**[Play Social Quest](https://decentraland.org/jump?realm=socialquest.dcl.eth&position=0,0&referrer=0xe339ebc7ec708bf42eed1b54a4df852312db2c5b)**
 
 Then walk into the Quest Zone and meet another player to begin.
 
