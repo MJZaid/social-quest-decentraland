@@ -1,6 +1,6 @@
 # 💗 Social Quest
 
-![Social Quest World](assets/images/buildsocialquest.png)
+![Social Quest](assets/images/portada.png)
 
 **Social Quest** is a mobile-first multiplayer social game for **Decentraland**. Players meet inside the Quest Zone, answer fun A/B questions together, discover how much they have in common, earn **Social Points**, and build persistent friendships over time.
 
@@ -173,6 +173,10 @@ The environment, interface, icons, 3D props, and interaction flow were created s
 ---
 
 ## 📸 Social Quest in Action
+
+### 🌍 Social Quest World
+
+![Social Quest World](assets/images/buildsocialquest.png)
 
 ### 🎮 Mobile Gameplay
 
